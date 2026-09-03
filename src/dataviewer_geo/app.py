@@ -217,31 +217,34 @@ def create_app(config: DataConfig) -> pn.Column:
                 metrics_data = None
 
             if ts_data is not None and not ts_data.empty:
-                # Skip re-render if same location
-                if state.get("last_plot_location_id") != location_id:
-                    # Get var_specs from editor
-                    var_spec_editor = state.get("var_spec_editor")
-                    var_specs = (
-                        var_spec_editor.to_var_specs() if var_spec_editor else None
-                    )
+                # Cache ts_data for config-driven replot
+                state["ts_data"] = ts_data
+                state["ts_location_id"] = location_id
+                state["ts_tile_id"] = tile_id
 
-                    # Plot timeseries using plotting_joseph
-                    figs = plot_location_timeseries(
-                        data=ts_data,
-                        location_ids=[location_id],
-                        var_specs=var_specs,
-                        time_col="time",
-                        location_id_col=config.id_column,
-                        figsize=(10, 5),
-                        font_scale=1.0,
-                        show_plot=False,
-                    )
+                # Get var_specs from editor
+                var_spec_editor = state.get("var_spec_editor")
+                var_specs = (
+                    var_spec_editor.to_var_specs() if var_spec_editor else None
+                )
 
-                    if figs and len(figs) > 0:
-                        timeseries_plot = pn.pane.Matplotlib(figs[0], tight=True)
-                        timeseries_pane.clear()
-                        timeseries_pane.append(timeseries_plot)
-                        state["last_plot_location_id"] = location_id
+                # Plot timeseries using plotting_joseph
+                figs = plot_location_timeseries(
+                    data=ts_data,
+                    location_ids=[location_id],
+                    var_specs=var_specs,
+                    time_col="time",
+                    location_id_col=config.id_column,
+                    figsize=(10, 5),
+                    font_scale=1.0,
+                    show_plot=False,
+                )
+
+                if figs and len(figs) > 0:
+                    timeseries_plot = pn.pane.Matplotlib(figs[0], tight=True)
+                    timeseries_pane.clear()
+                    timeseries_pane.append(timeseries_plot)
+                    state["last_plot_location_id"] = location_id
 
                 if metrics_data:
                     metrics_table = create_metrics_table(
@@ -297,6 +300,41 @@ def create_app(config: DataConfig) -> pn.Column:
             feature_importance_pane.append(
                 pn.pane.Markdown("Error loading feature importance")
             )
+
+    def regenerate_timeseries():
+        """Re-render timeseries plot with current var_specs (from cached ts_data)."""
+        ts_data = state.get("ts_data")
+        location_id = state.get("ts_location_id")
+
+        if ts_data is None or location_id is None:
+            return  # No data to replot
+
+        # Reset cache to force re-render
+        state["last_plot_location_id"] = None
+
+        # Get var_specs from editor
+        var_spec_editor = state.get("var_spec_editor")
+        var_specs = (
+            var_spec_editor.to_var_specs() if var_spec_editor else None
+        )
+
+        # Plot timeseries using plotting_joseph
+        figs = plot_location_timeseries(
+            data=ts_data,
+            location_ids=[location_id],
+            var_specs=var_specs,
+            time_col="time",
+            location_id_col=config.id_column,
+            figsize=(10, 5),
+            font_scale=1.0,
+            show_plot=False,
+        )
+
+        if figs and len(figs) > 0:
+            timeseries_plot = pn.pane.Matplotlib(figs[0], tight=True)
+            timeseries_pane.clear()
+            timeseries_pane.append(timeseries_plot)
+            state["last_plot_location_id"] = location_id
 
     def _make_highlight(
         location_id: int, map_data: pd.DataFrame, lon_col: str, lat_col: str
@@ -701,17 +739,18 @@ def create_app(config: DataConfig) -> pn.Column:
         if split_select.value
         else []
     )
-    var_spec_editor = VarSpecEditor(available_variables=ts_variables)
+
+    # Create editor with callback to regenerate plot on config change
+    var_spec_editor = VarSpecEditor(
+        available_variables=ts_variables, on_config_change=regenerate_timeseries
+    )
     # Add default variables
     for var in ts_variables[:3]:  # Add first 3 variables by default
         var_spec_editor.add_var(var)
     state["var_spec_editor"] = var_spec_editor
 
-    var_spec_pane = pn.Column(
-        pn.pane.Markdown("### Timeseries Configuration"),
-        var_spec_editor.render(),
-        sizing_mode="stretch_width",
-    )
+    # Use the editor's live layout (automatically updates on add/remove)
+    var_spec_pane = var_spec_editor.layout
 
     # =============================================================================
     # INITIALIZATION
