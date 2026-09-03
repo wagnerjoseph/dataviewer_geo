@@ -744,9 +744,9 @@ def create_app(config: DataConfig) -> pn.Column:
     var_spec_editor = VarSpecEditor(
         available_variables=ts_variables, on_config_change=regenerate_timeseries
     )
-    # Add default variables
-    for var in ts_variables[:3]:  # Add first 3 variables by default
-        var_spec_editor.add_var(var)
+    # Add default subplots (one per variable, creating 3 panels by default)
+    for var in ts_variables[:3]:
+        var_spec_editor.add_subplot(var)
     state["var_spec_editor"] = var_spec_editor
 
     # Use the editor's live layout (automatically updates on add/remove)

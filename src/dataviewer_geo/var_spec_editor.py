@@ -2,10 +2,12 @@
 
 Provides Panel widgets for configuring var_specs without writing code.
 Features:
-- Live layout: add/remove variables updates the UI immediately
-- Simplified essentials: Variable, Overlay, Color, Plot Style, Label
-- Advanced controls collapsed in accordion per row
+- Subplot-based model: each subplot = one panel with a primary variable + optional overlays
+- Live layout: add/remove subplots and variables updates the UI immediately
+- Compact rows: variable name + color + label on one line
+- Advanced options collapsed in accordion per variable
 - Auto-update callback (debounced) when config changes
+- Stable IDs for correct removal (no stale identity bugs)
 """
 
 from typing import Callable
@@ -19,8 +21,8 @@ pn.extension()
 class VarSpecEditor(param.Parameterized):
     """Interactive editor for building var_specs for plot_time_series.
 
-    Each variable/panel is represented as a compact row with essential controls.
-    Advanced options are in a collapsible accordion per row.
+    Each subplot represents one panel in the final plot.
+    Subplots contain a primary variable and optional overlay variables.
     """
 
     available_variables = param.List(default=[], doc="Available data columns")
@@ -35,16 +37,21 @@ class VarSpecEditor(param.Parameterized):
         if available_variables:
             self.available_variables = available_variables
         self.on_config_change = on_config_change
-        self._var_widgets: list[dict] = []
-        self._var_counter = 0
+        self._subplots: list[dict] = []
+        self._next_id = 0
         self._debounce_timer = None
+        self._suppress = False
 
-        # Live layout container
+        self._color_palette = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+        ]
+
         self.layout = pn.Column(
             pn.pane.Markdown("### Timeseries Configuration"),
             pn.pane.Markdown(
-                "*Each row = one variable. Click 'Add Variable' to add more. "
-                "Advanced options are in the collapsible accordion.*"
+                "*Each subplot = one panel. Add variables to overlay on the same panel. "
+                "Advanced options are in collapsible accordions.*"
             ),
             sizing_mode="stretch_width",
         )
@@ -52,114 +59,36 @@ class VarSpecEditor(param.Parameterized):
 
     def _debounced_trigger(self):
         """Trigger on_config_change with debounce (~300ms)."""
+        if self._suppress:
+            return
+
         if self._debounce_timer is not None:
             self._debounce_timer.cancel()
 
         def trigger():
-            if self.on_config_change:
+            if self.on_config_change and not self._suppress:
                 self.on_config_change()
 
-        # In server context, use Panel's debounce; otherwise call immediately
         if pn.state.curdoc is not None:
             self._debounce_timer = pn.state.curdoc.add_timeout_callback(trigger, 300)
         else:
-            # For testing/script context, call immediately
             trigger()
 
     def _on_widget_change(self, event=None):
         """Called when any widget changes - triggers debounced update."""
         self._debounced_trigger()
 
-    def _refresh_layout(self):
-        """Rebuild the layout from current _var_widgets."""
-        rows = []
-        for i, widgets in enumerate(self._var_widgets):
-            # Essentials row
-            essentials = pn.Row(
-                pn.Column(
-                    widgets["name"],
-                    widgets["label"],
-                    width=200,
-                ),
-                pn.Column(
-                    widgets["color"],
-                    widgets["plotstyle"],
-                    width=200,
-                ),
-                pn.Column(
-                    widgets["add_to"],
-                    width=200,
-                ),
-                widgets["remove_btn"],
-                margin=5,
-            )
+    def _get_next_color(self, used_colors: set) -> str:
+        """Get the next unused color from the palette."""
+        for c in self._color_palette:
+            if c not in used_colors:
+                return c
+        return self._color_palette[len(used_colors) % len(self._color_palette)]
 
-            # Advanced accordion
-            advanced = pn.Accordion(
-                (
-                    "Advanced",
-                    pn.Column(
-                        pn.Row(
-                            pn.Column(widgets["line_width"], widgets["alpha"], width=200),
-                            pn.Column(
-                                widgets["show_seasons"],
-                                widgets["interpolate"],
-                                width=200,
-                            ),
-                            pn.Column(
-                                widgets["add_second_axis"],
-                                widgets["align_zero"],
-                                widgets["compute_corr"],
-                                width=200,
-                            ),
-                        ),
-                        pn.Row(
-                            pn.Column(
-                                widgets["lower_threshold_val"],
-                                widgets["lower_threshold_color"],
-                                width=200,
-                            ),
-                            pn.Column(
-                                widgets["upper_threshold_val"],
-                                widgets["upper_threshold_color"],
-                                width=200,
-                            ),
-                            widgets["apply_shading_to_all"],
-                        ),
-                        sizing_mode="stretch_width",
-                    ),
-                ),
-                active=[],  # collapsed by default
-            )
-
-            row = pn.Column(essentials, advanced, sizing_mode="stretch_width")
-            rows.append(row)
-
-        # Add button
-        add_btn = pn.widgets.Button(
-            label="Add Variable",
-            color="success",
-            width=200,
-            margin=(10, 5),
-        )
-        add_btn.on_click(lambda e: self.add_var())
-
-        # Rebuild layout
-        self.layout.objects = [
-            self.layout.objects[0],  # Title
-            self.layout.objects[1],  # Instructions
-            add_btn,
-            *rows,
-        ]
-
-    def add_var(self, name: str | None = None) -> None:
-        """Add a new variable spec widget group."""
-        var_id = self._var_counter
-        self._var_counter += 1
-
+    def _create_variable_widgets(self, name: str | None = None, is_overlay: bool = False) -> dict:
+        """Create widgets for a variable row."""
         if name is None and self.available_variables:
-            # Default to first unused variable
-            used = {w["name"].value for w in self._var_widgets if w["name"].value}
+            used = self._get_used_variables()
             for v in self.available_variables:
                 if v not in used:
                     name = v
@@ -167,126 +96,296 @@ class VarSpecEditor(param.Parameterized):
             if name is None:
                 name = self.available_variables[0] if self.available_variables else ""
 
+        label_default = name.replace("_", " ").title() if name else ""
+        used_colors = self._get_used_colors()
+        color_default = self._get_next_color(used_colors)
+
         widgets = {
             "name": pn.widgets.Select(
                 options=self.available_variables,
                 value=name if name in self.available_variables else (self.available_variables[0] if self.available_variables else None),
             ),
-            "label": pn.widgets.TextInput(
-                value=name.replace("_", " ").title() if name else "",
-            ),
-            "color": pn.widgets.ColorPicker(value="#1f77b4"),
-            "line_width": pn.widgets.FloatSlider(
-                start=0.5, end=5, step=0.5, value=1.5
-            ),
+            "color": pn.widgets.ColorPicker(value=color_default),
+            "label": pn.widgets.TextInput(value=label_default),
+            "line_width": pn.widgets.FloatSlider(start=0.5, end=5, step=0.5, value=1.5),
             "alpha": pn.widgets.FloatSlider(start=0.1, end=1.0, step=0.1, value=1.0),
-            "plotstyle": pn.widgets.Select(
-                options=["line", "points", "both"], value="line"
-            ),
+            "plotstyle": pn.widgets.Select(options=["line", "points", "both"], value="line"),
             "show_seasons": pn.widgets.Checkbox(value=False),
             "interpolate": pn.widgets.Checkbox(value=False),
-            "add_to": pn.widgets.Select(options=["None"], value="None"),
-            "add_second_axis": pn.widgets.Checkbox(value=False),
-            "align_zero": pn.widgets.Checkbox(value=False),
-            "compute_corr": pn.widgets.Checkbox(value=False),
             "lower_threshold_val": pn.widgets.FloatInput(value=None),
             "lower_threshold_color": pn.widgets.ColorPicker(value="#ff0000"),
             "upper_threshold_val": pn.widgets.FloatInput(value=None),
             "upper_threshold_color": pn.widgets.ColorPicker(value="#0000ff"),
             "apply_shading_to_all": pn.widgets.Checkbox(value=False),
-            "remove_btn": pn.widgets.Button(
-                label=f"Remove {var_id}",
-                color="danger",
-                width=100,
-            ),
         }
 
-        # Wire up all widgets to trigger change
+        if is_overlay:
+            widgets["add_second_axis"] = pn.widgets.Checkbox(value=False)
+            widgets["align_zero"] = pn.widgets.Checkbox(value=False)
+            widgets["compute_corr"] = pn.widgets.Checkbox(value=False)
+            widgets["remove_btn"] = pn.widgets.Button(label="Remove", color="danger", width=80)
+
         for key, widget in widgets.items():
             if hasattr(widget, "param") and hasattr(widget.param, "value"):
                 widget.param.watch(self._on_widget_change, "value")
 
-        # Wire up remove button
-        def on_remove(event):
-            self.remove_var(var_id)
+        return widgets
 
-        widgets["remove_btn"].on_click(on_remove)
-        self._var_widgets.append(widgets)
-        self._update_overlay_options()
+    def _get_used_variables(self) -> set:
+        """Get all currently used variable names."""
+        used = set()
+        for sp in self._subplots:
+            primary_name = sp["primary"]["name"].value
+            if primary_name:
+                used.add(primary_name)
+            for ov in sp["overlays"]:
+                ov_name = ov["name"].value
+                if ov_name:
+                    used.add(ov_name)
+        return used
+
+    def _get_used_colors(self) -> set:
+        """Get all currently used colors."""
+        used = set()
+        for sp in self._subplots:
+            used.add(sp["primary"]["color"].value)
+            for ov in sp["overlays"]:
+                used.add(ov["color"].value)
+        return used
+
+    def _create_advanced_accordion(self, widgets: dict) -> pn.Accordion:
+        """Create collapsed accordion with advanced options."""
+        return pn.Accordion(
+            (
+                "Advanced",
+                pn.Column(
+                    pn.Row(
+                        pn.Column(widgets["line_width"], widgets["alpha"], width=200),
+                        pn.Column(widgets["show_seasons"], widgets["interpolate"], width=200),
+                        pn.Column(widgets["plotstyle"], width=200),
+                    ),
+                    pn.Row(
+                        pn.Column(widgets["lower_threshold_val"], widgets["lower_threshold_color"], width=200),
+                        pn.Column(widgets["upper_threshold_val"], widgets["upper_threshold_color"], width=200),
+                        widgets["apply_shading_to_all"],
+                    ),
+                    sizing_mode="stretch_width",
+                ),
+            ),
+            active=[],
+        )
+
+    def _refresh_layout(self):
+        """Rebuild the layout from current _subplots."""
+        if self._suppress:
+            return
+
+        subplot_cards = []
+
+        for sp_idx, sp in enumerate(self._subplots):
+            subplot_num = sp_idx + 1
+
+            primary = sp["primary"]
+            primary_row = pn.Row(
+                pn.Column(primary["name"], width=250),
+                pn.Column(primary["color"], width=100),
+                pn.Column(primary["label"], width=200),
+                margin=(5, 5, 0, 5),
+            )
+            primary_advanced = self._create_advanced_accordion(primary)
+
+            overlay_rows = []
+            for ov_idx, ov in enumerate(sp["overlays"]):
+                ov_row = pn.Row(
+                    pn.Column(ov["name"], width=250),
+                    pn.Column(ov["color"], width=100),
+                    pn.Column(ov["label"], width=200),
+                    pn.Column(ov["add_second_axis"], ov["align_zero"], width=200),
+                    ov["remove_btn"],
+                    margin=(5, 5, 0, 5),
+                )
+                ov_advanced = self._create_advanced_accordion(ov)
+                overlay_rows.append(pn.Column(ov_row, ov_advanced, sizing_mode="stretch_width"))
+
+            add_var_btn = pn.widgets.Button(label="+ Add variable", color="default", width=150, margin=(5, 5))
+
+            def make_add_var(subplot_id):
+                def on_click(event):
+                    self.add_variable(subplot_id)
+                return on_click
+
+            add_var_btn.on_click(make_add_var(sp["id"]))
+
+            remove_sp_btn = pn.widgets.Button(label="Remove subplot", color="warning", width=120)
+
+            def make_remove_subplot(subplot_id):
+                def on_click(event):
+                    self.remove_subplot(subplot_id)
+                return on_click
+
+            remove_sp_btn.on_click(make_remove_subplot(sp["id"]))
+
+            header = pn.Row(
+                pn.pane.Markdown(f"#### Subplot {subplot_num}"),
+                remove_sp_btn,
+                margin=(10, 0, 5, 0),
+            )
+
+            card = pn.Column(
+                header,
+                pn.Column(primary_row, primary_advanced, sizing_mode="stretch_width"),
+                add_var_btn,
+                *overlay_rows,
+                styles={"border": "1px solid #ddd", "border-radius": "5px", "padding": "10px"},
+                sizing_mode="stretch_width",
+                margin=(5, 0),
+            )
+            subplot_cards.append(card)
+
+        add_subplot_btn = pn.widgets.Button(
+            label="+ Add subplot",
+            color="success",
+            width=150,
+            margin=(10, 5),
+        )
+        add_subplot_btn.on_click(lambda e: self.add_subplot())
+
+        self.layout.objects = [
+            self.layout.objects[0],
+            self.layout.objects[1],
+            add_subplot_btn,
+            *subplot_cards,
+        ]
+
+    def add_subplot(self, primary_name: str | None = None) -> int:
+        """Add a new subplot with a primary variable."""
+        subplot_id = self._next_id
+        self._next_id += 1
+
+        primary_widgets = self._create_variable_widgets(name=primary_name, is_overlay=False)
+        for key, widget in primary_widgets.items():
+            if hasattr(widget, "param") and hasattr(widget.param, "value"):
+                widget.param.watch(self._on_widget_change, "value")
+
+        subplot = {
+            "id": subplot_id,
+            "primary": primary_widgets,
+            "overlays": [],
+        }
+        self._subplots.append(subplot)
+        self._refresh_layout()
+        self._on_widget_change()
+        return subplot_id
+
+    def remove_subplot(self, subplot_id: int) -> None:
+        """Remove a subplot by its stable ID."""
+        self._subplots = [sp for sp in self._subplots if sp["id"] != subplot_id]
         self._refresh_layout()
         self._on_widget_change()
 
-    def remove_var(self, var_id: int) -> None:
-        """Remove a variable spec widget group."""
-        self._var_widgets = [
-            w for i, w in enumerate(self._var_widgets) if i != var_id
-        ]
-        self._update_overlay_options()
+    def add_variable(self, subplot_id: int, name: str | None = None) -> None:
+        """Add an overlay variable to a subplot."""
+        subplot = next((sp for sp in self._subplots if sp["id"] == subplot_id), None)
+        if subplot is None:
+            return
+
+        overlay_widgets = self._create_variable_widgets(name=name, is_overlay=True)
+
+        def on_remove(event, sid=subplot_id, oid=id(overlay_widgets)):
+            self.remove_variable(sid, oid)
+
+        overlay_widgets["remove_btn"].on_click(on_remove)
+
+        subplot["overlays"].append(overlay_widgets)
         self._refresh_layout()
         self._on_widget_change()
 
-    def _update_overlay_options(self) -> None:
-        """Update 'add_to' dropdown options with current panel variables."""
-        panel_vars = [
-            w["name"].value for w in self._var_widgets if w["add_to"].value == "None"
-        ]
-        for widgets in self._var_widgets:
-            current = widgets["add_to"].value
-            widgets["add_to"].options = ["None"] + panel_vars
-            if current in widgets["add_to"].options:
-                widgets["add_to"].value = current
+    def remove_variable(self, subplot_id: int, overlay_id: int) -> None:
+        """Remove an overlay variable from a subplot by object identity."""
+        subplot = next((sp for sp in self._subplots if sp["id"] == subplot_id), None)
+        if subplot is None:
+            return
+
+        subplot["overlays"] = [ov for ov in subplot["overlays"] if id(ov) != overlay_id]
+        self._refresh_layout()
+        self._on_widget_change()
 
     def to_var_specs(self) -> list[dict]:
         """Collect widget states into var_specs list for plot_time_series."""
         specs = []
-        for widgets in self._var_widgets:
-            name = widgets["name"].value
-            if not name:
+
+        for sp in self._subplots:
+            primary = sp["primary"]
+            primary_name = primary["name"].value
+            if not primary_name:
                 continue
 
-            spec = {
-                "name": name,
-                "label": widgets["label"].value,
-                "color": widgets["color"].value,
-                "line_width": widgets["line_width"].value,
-                "alpha": widgets["alpha"].value,
-                "plotstyle": widgets["plotstyle"].value,
-                "show_seasons": widgets["show_seasons"].value,
-                "interpolate": widgets["interpolate"].value,
+            primary_spec = {
+                "name": primary_name,
+                "label": primary["label"].value,
+                "color": primary["color"].value,
+                "line_width": primary["line_width"].value,
+                "alpha": primary["alpha"].value,
+                "plotstyle": primary["plotstyle"].value,
+                "show_seasons": primary["show_seasons"].value,
+                "interpolate": primary["interpolate"].value,
             }
 
-            # Overlay settings
-            add_to = widgets["add_to"].value
-            if add_to != "None":
-                spec["add_to"] = add_to
-                if widgets["add_second_axis"].value:
-                    spec["add_second_axis"] = True
-                if widgets["align_zero"].value:
-                    spec["align_zero"] = True
-                if widgets["compute_corr"].value:
-                    spec["compute_corr"] = True
-
-            # Thresholds
-            lower_val = widgets["lower_threshold_val"].value
+            lower_val = primary["lower_threshold_val"].value
             if lower_val is not None:
-                spec["lower_treshold"] = (
-                    lower_val,
-                    widgets["lower_threshold_color"].value,
-                )
+                primary_spec["lower_treshold"] = (lower_val, primary["lower_threshold_color"].value)
 
-            upper_val = widgets["upper_threshold_val"].value
+            upper_val = primary["upper_threshold_val"].value
             if upper_val is not None:
-                spec["upper_treshold"] = (
-                    upper_val,
-                    widgets["upper_threshold_color"].value,
-                )
+                primary_spec["upper_treshold"] = (upper_val, primary["upper_threshold_color"].value)
 
-            if widgets["apply_shading_to_all"].value:
-                spec["apply_shading_to_all"] = True
+            if primary["apply_shading_to_all"].value:
+                primary_spec["apply_shading_to_all"] = True
 
-            specs.append(spec)
+            specs.append(primary_spec)
+
+            for ov in sp["overlays"]:
+                ov_name = ov["name"].value
+                if not ov_name:
+                    continue
+
+                ov_spec = {
+                    "name": ov_name,
+                    "label": ov["label"].value,
+                    "color": ov["color"].value,
+                    "line_width": ov["line_width"].value,
+                    "alpha": ov["alpha"].value,
+                    "plotstyle": ov["plotstyle"].value,
+                    "show_seasons": ov["show_seasons"].value,
+                    "interpolate": ov["interpolate"].value,
+                    "add_to": primary_name,
+                }
+
+                if ov["add_second_axis"].value:
+                    ov_spec["add_second_axis"] = True
+                if ov["align_zero"].value:
+                    ov_spec["align_zero"] = True
+                if ov["compute_corr"].value:
+                    ov_spec["compute_corr"] = True
+
+                lower_val = ov["lower_threshold_val"].value
+                if lower_val is not None:
+                    ov_spec["lower_treshold"] = (lower_val, ov["lower_threshold_color"].value)
+
+                upper_val = ov["upper_threshold_val"].value
+                if upper_val is not None:
+                    ov_spec["upper_treshold"] = (upper_val, ov["upper_threshold_color"].value)
+
+                if ov["apply_shading_to_all"].value:
+                    ov_spec["apply_shading_to_all"] = True
+
+                specs.append(ov_spec)
 
         return specs
+
+    def add_var(self, name: str | None = None) -> None:
+        """Backward-compatible alias for add_subplot."""
+        self.add_subplot(name)
 
 
 def create_var_spec_editor(
