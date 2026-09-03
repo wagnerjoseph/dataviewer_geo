@@ -4,7 +4,7 @@ Interactive geospatial timeseries data viewer for Earth observation data.
 
 ---
 
-## 🚀 Quick Start — Run the Viewer
+## Quick Start — Run the Viewer
 
 > If you don't provide a data path, the app **automatically creates a dummy
 > dataset** and serves it. No setup required.
@@ -15,7 +15,7 @@ Interactive geospatial timeseries data viewer for Earth observation data.
 uv sync        # or: pip install -e .
 ```
 
-### 1️⃣ Run it — no data path (auto dummy data)
+### Run it — no data path (auto dummy data)
 
 ```bash
 python scripts/run_app.py
@@ -36,7 +36,7 @@ To open the browser automatically, add `--show`:
 python scripts/run_app.py --show
 ```
 
-### 2️⃣ Point it at your own data
+### Point it at your own data
 
 ```bash
 python scripts/run_app.py --data /path/to/your/data
@@ -50,7 +50,7 @@ Force it with `--format backscatter|generic`, or change the port with
 python scripts/run_app.py --data /path/to/your/data --port 5006
 ```
 
-### 3️⃣ Alternative: `panel serve` (production / many apps)
+### Alternative: `panel serve` (production / many apps)
 
 ```bash
 # Dummy data
