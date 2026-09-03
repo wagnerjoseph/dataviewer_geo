@@ -144,7 +144,7 @@ class TestVarSpecEditor:
         overlay = editor._subplots[0]["overlays"][0]
         assert "add_second_axis" in overlay
         assert "align_zero" in overlay
-        assert "compute_corr" in overlay
+        assert "remove_btn" in overlay
 
     def test_create_var_spec_editor(self):
         """Test create_var_spec_editor helper function."""
@@ -231,7 +231,6 @@ class TestVarSpecEditor:
 
         editor._subplots[0]["overlays"][0]["add_second_axis"].value = True
         editor._subplots[0]["overlays"][0]["align_zero"].value = True
-        editor._subplots[0]["overlays"][0]["compute_corr"].value = True
 
         specs = editor.to_var_specs()
 
@@ -243,6 +242,6 @@ class TestVarSpecEditor:
         assert primary_keys == expected_primary
 
         overlay_keys = set(specs[1].keys())
-        expected_overlay = expected_primary | {"add_to", "add_second_axis", "align_zero", "compute_corr"}
+        expected_overlay = expected_primary | {"add_to", "add_second_axis", "align_zero"}
         assert overlay_keys == expected_overlay
         assert specs[1]["add_to"] == "var1"

@@ -93,7 +93,7 @@ Configuration** accordion.
 
 - **Interactive Map**: GeoViews map with OSM basemap, clickable points, highlight markers
 - **Timeseries Visualization**: Multi-panel timeseries with configurable `var_specs`
-- **Interactive var_specs Editor**: configure plots without code (variables, overlays, secondary axes, thresholds, seasons, correlations)
+- **Interactive var_specs Editor**: configure plots without code (variables, overlays, secondary axes, thresholds, seasons)
 - **Feature Importance** bar charts and **Metrics** comparison table (when the dataset provides them)
 - **Pluggable Adapters**: `DatasetAdapter` interface supports any geo-timeseries data format
 - **Auto-Discovery**: groups, variables, and locations discovered from data files
@@ -218,8 +218,7 @@ default) and the corresponding panes show "not available".
 3. **+ Add variable** → overlay variables on a panel.
 4. Configure each variable (name, label, color; advanced options for line
    width, alpha, plot style, seasons, thresholds are in a collapsed accordion).
-5. For overlays: secondary axis, zero-alignment, and Pearson+Spearman
-   correlation toggles are available.
+5. For overlays: secondary-axis and zero-alignment toggles are available.
 
 Changes re-render the current location's timeseries automatically.
 

@@ -134,9 +134,6 @@ class VarSpecEditor(param.Parameterized):
                 name="Second Y-axis", value=False
             )
             widgets["align_zero"] = pn.widgets.Checkbox(name="Align zero", value=False)
-            widgets["compute_corr"] = pn.widgets.Checkbox(
-                name="Correlation", value=False
-            )
             widgets["remove_btn"] = pn.widgets.Button(
                 label="Remove", button_type="danger", width=80
             )
@@ -234,7 +231,6 @@ class VarSpecEditor(param.Parameterized):
                     ov["label"],
                     ov["add_second_axis"],
                     ov["align_zero"],
-                    ov["compute_corr"],
                     ov["remove_btn"],
                     ov_advanced,
                     align="end",
@@ -412,8 +408,6 @@ class VarSpecEditor(param.Parameterized):
                     ov_spec["add_second_axis"] = True
                 if ov["align_zero"].value:
                     ov_spec["align_zero"] = True
-                if ov["compute_corr"].value:
-                    ov_spec["compute_corr"] = True
 
                 lower_val = ov["lower_threshold_val"].value
                 if lower_val is not None:
