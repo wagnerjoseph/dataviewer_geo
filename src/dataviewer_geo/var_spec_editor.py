@@ -40,7 +40,6 @@ class VarSpecEditor(param.Parameterized):
         self._subplots: list[dict] = []
         self._next_id = 0
         self._debounce_timer = None
-        self._suppress = False
 
         self._color_palette = [
             "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -59,14 +58,16 @@ class VarSpecEditor(param.Parameterized):
 
     def _debounced_trigger(self):
         """Trigger on_config_change with debounce (~300ms)."""
-        if self._suppress:
-            return
-
         if self._debounce_timer is not None:
-            self._debounce_timer.cancel()
+            try:
+                pn.state.curdoc.remove_timeout_callback(self._debounce_timer)
+            except Exception:
+                pass
+            self._debounce_timer = None
 
         def trigger():
-            if self.on_config_change and not self._suppress:
+            self._debounce_timer = None
+            if self.on_config_change:
                 self.on_config_change()
 
         if pn.state.curdoc is not None:
@@ -177,9 +178,6 @@ class VarSpecEditor(param.Parameterized):
 
     def _refresh_layout(self):
         """Rebuild the layout from current _subplots."""
-        if self._suppress:
-            return
-
         subplot_cards = []
 
         for sp_idx, sp in enumerate(self._subplots):
@@ -263,9 +261,6 @@ class VarSpecEditor(param.Parameterized):
         self._next_id += 1
 
         primary_widgets = self._create_variable_widgets(name=primary_name, is_overlay=False)
-        for key, widget in primary_widgets.items():
-            if hasattr(widget, "param") and hasattr(widget.param, "value"):
-                widget.param.watch(self._on_widget_change, "value")
 
         subplot = {
             "id": subplot_id,

@@ -188,3 +188,61 @@ class TestVarSpecEditor:
 
         editor._subplots[0]["primary"]["label"].value = "New Label"
         assert call_count[0] >= 1
+
+    def test_debounce_no_crash_on_rapid_changes(self):
+        """Test that rapid widget changes don't crash (regression for TimeoutCallback.cancel)."""
+        call_count = [0]
+
+        def callback():
+            call_count[0] += 1
+
+        editor = VarSpecEditor(available_variables=["var1", "var2"], on_config_change=callback)
+        editor.add_subplot("var1")
+
+        for _ in range(10):
+            editor._subplots[0]["primary"]["label"].value = f"Label {_}"
+
+        assert call_count[0] >= 1
+
+    def test_debounce_timer_cleared_on_fire(self):
+        """Test that _debounce_timer is cleared after callback fires (prevents ValueError on re-arm)."""
+        call_count = [0]
+
+        def callback():
+            call_count[0] += 1
+
+        editor = VarSpecEditor(available_variables=["var1"], on_config_change=callback)
+        editor.add_subplot("var1")
+
+        assert editor._debounce_timer is None
+
+        editor._subplots[0]["primary"]["label"].value = "First"
+        assert editor._debounce_timer is None
+
+        editor._subplots[0]["primary"]["label"].value = "Second"
+        assert editor._debounce_timer is None
+        assert call_count[0] >= 2
+
+    def test_var_spec_keys_correct(self):
+        """Test that var_specs have exactly the keys plotting_joseph expects."""
+        editor = VarSpecEditor(available_variables=["var1", "var2"])
+        subplot_id = editor.add_subplot("var1")
+        editor.add_variable(subplot_id, "var2")
+
+        editor._subplots[0]["overlays"][0]["add_second_axis"].value = True
+        editor._subplots[0]["overlays"][0]["align_zero"].value = True
+        editor._subplots[0]["overlays"][0]["compute_corr"].value = True
+
+        specs = editor.to_var_specs()
+
+        primary_keys = set(specs[0].keys())
+        expected_primary = {
+            "name", "label", "color", "line_width", "alpha", "plotstyle",
+            "show_seasons", "interpolate",
+        }
+        assert primary_keys == expected_primary
+
+        overlay_keys = set(specs[1].keys())
+        expected_overlay = expected_primary | {"add_to", "add_second_axis", "align_zero", "compute_corr"}
+        assert overlay_keys == expected_overlay
+        assert specs[1]["add_to"] == "var1"
