@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dataviewer_geo"
+version = "0.1.0"
+description = "Interactive geospatial timeseries data viewer for Earth observation data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Joseph Wagner", email = "joseph.wagner@geo.tuwien.ac.at" },
+]
+keywords = [
+    "visualization",
+    "timeseries",
+    "maps",
+    "earth-observation",
+    "backscatter",
+    "remote-sensing",
+    "panel",
+    "holoviews",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+
+[project.urls]
+Repository = "https://github.com/wagnerjoseph/dataviewer_geo"
+Documentation = "https://github.com/wagnerjoseph/dataviewer_geo"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
+[dependencies]
+pandas = ">=2.0"
+numpy = ">=1.24"
+matplotlib = ">=3.7"
+pyarrow = ">=12.0"
+panel = ">=1.3"
+holoviews = ">=1.17"
+geoviews = ">=1.10"
+bokeh = ">=3.3"
+plotting-joseph = { git = "https://github.com/wagnerjoseph/plotting_geo.git" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dataviewer_geo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
