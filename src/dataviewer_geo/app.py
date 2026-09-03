@@ -61,6 +61,10 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
     # Pre-load coordinates
     coords = adapter.location_coordinates()
 
+    # Column names from the adapter's schema
+    id_col = adapter.id_column
+    time_col = adapter.time_column
+
     # Per-session state
     state = {
         "current_group": None,
@@ -87,7 +91,7 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
     )
 
     # Get variables for initial group
-    initial_variables = adapter.variables()
+    initial_variables = adapter.variables(group_select.value)
     variable_select = pn.widgets.Select(
         name="Variable",
         options=initial_variables,
@@ -149,10 +153,9 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
 
     def _get_map_data(group: str, variable_name: str) -> pd.DataFrame:
         """Load and prepare map data with coordinates."""
-        var_data = adapter.load_variable_data(variable_name)
+        var_data = adapter.load_variable_data(variable_name, group=group)
         if coords is not None and not var_data.empty:
             # Merge with coordinates if needed
-            id_col = "location_id"
             if id_col in var_data.columns and id_col in coords.columns:
                 merged = var_data.merge(coords, on=id_col, how="left")
                 lon_cols = [c for c in merged.columns if c.startswith("lon")]
@@ -171,7 +174,6 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
             if map_data is None:
                 return
 
-            id_col = "location_id"
             matching = map_data[map_data[id_col] == location_id]
             if matching.empty:
                 return
@@ -218,7 +220,7 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
                     data=ts_data,
                     location_ids=[location_id],
                     var_specs=var_specs,
-                    time_col="time",
+                    time_col=time_col,
                     location_id_col=id_col,
                     figsize=(10, 5),
                     font_scale=1.0,
@@ -233,11 +235,8 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
 
                 # Display metrics if available
                 if metrics_data:
-                    # Use default metric models config if adapter doesn't provide one
-                    from .config import DataConfig
-                    default_config = DataConfig(root=adapter.root if hasattr(adapter, 'root') else None)
                     metrics_table = create_metrics_table(
-                        metrics_data, default_config.metric_models
+                        metrics_data, adapter.metric_models
                     )
                     metrics_table_pane.clear()
                     metrics_table_pane.append(metrics_table)
@@ -249,7 +248,9 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
 
                 # Display feature importance if available
                 if fi_data:
-                    fi_plot = create_feature_importance_plot(fi_data, "fi_")
+                    fi_plot = create_feature_importance_plot(
+                        fi_data, adapter.fi_col_prefix
+                    )
                     feature_importance_pane.clear()
                     feature_importance_pane.append(fi_plot)
                 else:
@@ -311,8 +312,8 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
             data=ts_data,
             location_ids=[location_id],
             var_specs=var_specs,
-            time_col="time",
-            location_id_col="location_id",
+            time_col=time_col,
+            location_id_col=id_col,
             figsize=(10, 5),
             font_scale=1.0,
             show_plot=False,
@@ -331,7 +332,7 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
         if location_id is None or map_data is None:
             return hv.Overlay([])
 
-        id_col = "location_id"
+
         matching = map_data.loc[map_data[id_col] == location_id]
         if matching.empty:
             return hv.Overlay([])
@@ -396,7 +397,7 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
         def on_selection_update(index):
             """Update UI elements when selection changes."""
             map_data = state.get("map_data")
-            id_col = "location_id"
+
             if map_data is None or index is None or len(index) == 0:
                 state["selected_location_id"] = None
                 location_input.value = None
@@ -453,7 +454,7 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
             lat_cols = [c for c in map_data.columns if c.startswith("lat")]
             actual_lon = lon_cols[0] if lon_cols else "lon"
             actual_lat = lat_cols[0] if lat_cols else "lat"
-            id_col = "location_id"
+
 
             # Compute color limits
             vmin, vmax = _auto_clim(map_data[variable_name].values)
@@ -566,7 +567,7 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
             lat_cols = [c for c in map_data.columns if c.startswith("lat")]
             actual_lon = lon_cols[0] if lon_cols else "lon"
             actual_lat = lat_cols[0] if lat_cols else "lat"
-            id_col = "location_id"
+
 
             # Compute new color limits
             vmin, vmax = _auto_clim(map_data[variable_name].values)
@@ -668,15 +669,19 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
 
     def on_group_change(event):
         """Handle group selection change."""
+        group = event.new
         state["last_plot_location_id"] = None
 
-        variables = adapter.variables()
-        if variables:
-            variable_select.options = variables
-            variable_select.value = variables[0]
-        else:
-            variable_select.options = []
-            variable_select.value = None
+        variables = adapter.variables(group)
+        new_var = variables[0] if variables else None
+        variable_select.options = variables
+
+        if new_var != variable_select.value:
+            # Setting value triggers on_variable_change, which reloads the map.
+            variable_select.value = new_var
+        elif group and new_var:
+            # Variable unchanged, but still refresh the map for the new group.
+            update_map_data(group, new_var)
 
     def on_variable_change(event):
         """Handle variable selection change."""
@@ -699,7 +704,7 @@ def create_app(adapter: "DatasetAdapter") -> pn.Column:
         if state["map_data"] is None:
             return
 
-        id_col = "location_id"
+
         matching = state["map_data"][state["map_data"][id_col] == location_id]
 
         if matching.empty:

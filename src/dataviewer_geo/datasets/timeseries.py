@@ -138,7 +138,7 @@ class GenericTimeseriesAdapter(DatasetAdapter):
         """Return list of available groups."""
         return self._groups
 
-    def variables(self) -> list[str]:
+    def variables(self, group: str | None = None) -> list[str]:
         """Return list of map variables.
 
         For generic datasets, this returns timeseries variables
@@ -146,7 +146,8 @@ class GenericTimeseriesAdapter(DatasetAdapter):
         """
         if not self._groups:
             return []
-        return self._ts_variables.get(self._groups[0], [])
+        g = group if (group and group in self._groups) else self._groups[0]
+        return self._ts_variables.get(g, self._ts_variables.get(self._groups[0], []))
 
     def timeseries_variables(self, group: str | None = None) -> list[str]:
         """Return list of timeseries variables for a group."""
@@ -168,18 +169,18 @@ class GenericTimeseriesAdapter(DatasetAdapter):
 
         return self._coords[[self.config.id_column, self.config.lon_column, self.config.lat_column]].copy()
 
-    def load_variable_data(self, variable: str) -> pd.DataFrame:
+    def load_variable_data(self, variable: str, group: str | None = None) -> pd.DataFrame:
         """Load variable data for map visualization.
 
         For generic datasets, this computes the mean of the variable
-        across time for each location.
+        across time for each location in the selected group.
         """
         if self._coords is None or not self._groups:
             return pd.DataFrame()
 
-        # Load timeseries from first group and compute mean per location
-        group = self._groups[0]
-        ts_file = self._group_files.get(group)
+        # Use the selected group, defaulting to the first
+        g = group if (group and group in self._groups) else self._groups[0]
+        ts_file = self._group_files.get(g)
         if ts_file is None:
             return pd.DataFrame()
 
@@ -193,7 +194,6 @@ class GenericTimeseriesAdapter(DatasetAdapter):
 
         # Compute mean per location
         aggregated = ts_data.groupby(self.config.id_column)[variable].mean().reset_index()
-        aggregated = aggregated.rename(columns={variable: variable})
 
         # Merge with coordinates
         coords = self.location_coordinates()
@@ -223,3 +223,15 @@ class GenericTimeseriesAdapter(DatasetAdapter):
     def resolve_tile(self, group: str, location_id: int) -> str | None:
         """Return group as tile identifier (for API compatibility)."""
         return group
+
+    # ------------------------------------------------------------------
+    # Dataset schema metadata
+    # ------------------------------------------------------------------
+
+    @property
+    def id_column(self) -> str:
+        return self.config.id_column
+
+    @property
+    def time_column(self) -> str:
+        return self.config.time_column

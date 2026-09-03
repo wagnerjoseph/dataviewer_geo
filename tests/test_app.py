@@ -1,6 +1,6 @@
 """Tests for the Panel application."""
 
-from dataviewer_geo.app import create_app, create_app_from_config
+from dataviewer_geo.app import create_app_from_config
 from dataviewer_geo.config import DataConfig
 
 

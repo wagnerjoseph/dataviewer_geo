@@ -54,31 +54,35 @@ class BackscatterMLAdapter(DatasetAdapter):
         """Return list of available splits."""
         return self._index.splits
 
-    def variables(self) -> list[str]:
+    def _resolve_group(self, group: str | None) -> str | None:
+        """Return the group to use, defaulting to the last split."""
+        if group is None:
+            return self._index.splits[-1] if self._index.splits else None
+        return group if group in self._index.splits else None
+
+    def variables(self, group: str | None = None) -> list[str]:
         """Return list of map variables from metrics_global_plot."""
-        if not self._index.splits:
+        split = self._resolve_group(group)
+        if split is None:
             return []
-        # Use the last split by default for variable discovery
-        return get_variable_names(self.config, self._index.splits[-1])
+        return get_variable_names(self.config, split)
 
     def timeseries_variables(self, group: str | None = None) -> list[str]:
         """Return list of timeseries variables."""
-        if group is None:
-            group = self._index.splits[-1] if self._index.splits else None
-        if group is None:
+        split = self._resolve_group(group)
+        if split is None:
             return []
-        return get_timeseries_variables(self.config, group)
+        return get_timeseries_variables(self.config, split)
 
     def location_coordinates(self) -> pd.DataFrame | None:
         """Load location coordinates."""
         return self._coords
 
-    def load_variable_data(self, variable: str) -> pd.DataFrame:
+    def load_variable_data(self, variable: str, group: str | None = None) -> pd.DataFrame:
         """Load variable data for map visualization."""
-        if not self._index.splits:
+        split = self._resolve_group(group)
+        if split is None:
             return pd.DataFrame()
-        # Use the last split for map data
-        split = self._index.splits[-1]
         return load_variable_data(self.config, split, variable)
 
     def load_timeseries(self, group: str, location_id: int) -> pd.DataFrame | None:
@@ -128,3 +132,23 @@ class BackscatterMLAdapter(DatasetAdapter):
         if matching.empty:
             return None
         return str(matching[self.config.tile_col].iloc[0])
+
+    # ------------------------------------------------------------------
+    # Dataset schema metadata
+    # ------------------------------------------------------------------
+
+    @property
+    def id_column(self) -> str:
+        return self.config.id_column
+
+    @property
+    def time_column(self) -> str:
+        return "time"
+
+    @property
+    def metric_models(self) -> dict | None:
+        return self.config.metric_models
+
+    @property
+    def fi_col_prefix(self) -> str:
+        return self.config.fi_col_prefix
