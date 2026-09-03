@@ -198,8 +198,8 @@ class VarSpecEditor(param.Parameterized):
             ("Advanced", content),
             active=[],
             header_background="#f7f7f7",
-            width=170,
-            max_width=170,
+            width=300,
+            max_width=300,
             margin=(0, 0, 0, 4),
         )
 
