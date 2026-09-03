@@ -1,4 +1,7 @@
-"""Timeseries plotting using plotting_joseph."""
+"""Timeseries plotting using vendored plotting code.
+
+This module wraps the vendored plot_time_series function from plotting_joseph.
+"""
 
 import logging
 import pandas as pd
@@ -18,12 +21,12 @@ def plot_location_timeseries(
     save_dir: str | None = None,
     master_lookup: str | None = None,
 ) -> list:
-    """Plot timeseries data using plotting_joseph.plot_time_series.
+    """Plot timeseries data using plot_time_series.
 
     Args:
         data: DataFrame with location_id, time, and variable columns
         location_ids: List of location IDs to plot
-        var_specs: Variable specifications for plotting_joseph (see var_spec_editor)
+        var_specs: Variable specifications (see var_spec_editor)
         time_col: Name of time column
         location_id_col: Name of location ID column
         figsize: Base figure size
@@ -35,13 +38,7 @@ def plot_location_timeseries(
     Returns:
         List of matplotlib Figure objects (one per location)
     """
-    try:
-        from plotting_joseph import plot_time_series
-    except ImportError as e:
-        logger.error(f"Could not import plotting_joseph: {e}")
-        raise ImportError(
-            "plotting_joseph is required. Install with: pip install plotting-joseph"
-        ) from e
+    from ._vendored.timeseries import plot_time_series
 
     # Prepare data
     df = data.copy()
@@ -56,7 +53,7 @@ def plot_location_timeseries(
     if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
         df[time_col] = pd.to_datetime(df[time_col])
 
-    # Call plotting_joseph's function
+    # Call vendored plot_time_series
     figs = plot_time_series(
         data=df,
         var_specs=var_specs,

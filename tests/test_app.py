@@ -1,6 +1,6 @@
 """Tests for the Panel application."""
 
-from dataviewer_geo.app import create_app
+from dataviewer_geo.app import create_app, create_app_from_config
 from dataviewer_geo.config import DataConfig
 
 
@@ -9,7 +9,7 @@ class TestCreateApp:
 
     def test_create_app_basic(self, data_config):
         """Test basic app creation."""
-        app = create_app(data_config)
+        app = create_app_from_config(data_config)
 
         # Check that app is a Panel Column
         assert hasattr(app, "objects")
@@ -17,7 +17,7 @@ class TestCreateApp:
 
     def test_app_has_widgets(self, data_config):
         """Test that app has required widgets."""
-        app = create_app(data_config)
+        app = create_app_from_config(data_config)
 
         # The app should have split, variable, and location selectors
         # We can't easily test the internal structure without importing panel
@@ -27,7 +27,7 @@ class TestCreateApp:
     def test_app_with_empty_data_raises(self, tmp_path):
         """Test that app creation fails gracefully with no data."""
         config = DataConfig(root=tmp_path)
-        app = create_app(config)
+        app = create_app_from_config(config)
 
         # Should return an error message, not crash
         assert app is not None

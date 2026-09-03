@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dataviewer_geo"
-version = "0.1.0"
+version = "0.3.0"
 description = "Interactive geospatial timeseries data viewer for Earth observation data"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,7 +37,6 @@ dependencies = [
     "holoviews>=1.17",
     "geoviews>=1.10",
     "bokeh>=3.3",
-    "plotting-joseph @ git+https://github.com/wagnerjoseph/plotting_geo.git",
 ]
 
 [project.urls]
@@ -49,9 +48,6 @@ dev = ["pytest>=7.0", "ruff>=0.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dataviewer_geo"]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

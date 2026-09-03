@@ -1,7 +1,13 @@
-"""Interactive Panel application for dataviewer_geo."""
+"""Interactive Panel application for dataviewer_geo.
+
+This module provides the main application UI, now decoupled from specific
+data schemas via the DatasetAdapter interface.
+"""
 
 import logging
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import panel as pn
 import pandas as pd
@@ -10,18 +16,7 @@ import holoviews as hv
 import geoviews as gv
 
 from .config import DataConfig
-from .data import (
-    DataIndex,
-    find_splits,
-    get_variable_names,
-    load_location_coordinates,
-    load_variable_data,
-    load_location_lookup,
-    load_timeseries_for_location,
-    load_feature_importance_for_location,
-    load_metrics_from_tile,
-    get_timeseries_variables,
-)
+from .data import generate_dummy_data
 from .plotting import (
     plot_location_timeseries,
     create_feature_importance_plot,
@@ -30,6 +25,9 @@ from .plotting import (
 )
 from .var_spec_editor import VarSpecEditor
 
+if TYPE_CHECKING:
+    from .datasets import DatasetAdapter
+
 logger = logging.getLogger(__name__)
 
 pn.extension()
@@ -37,63 +35,59 @@ hv.extension("bokeh")
 gv.extension("bokeh")
 
 
-def create_app(config: DataConfig) -> pn.Column:
+def create_app(adapter: "DatasetAdapter") -> pn.Column:
     """Create the interactive data viewer application.
 
     Args:
-        config: DataConfig instance pointing to data root
+        adapter: DatasetAdapter instance providing data access.
+                 Can be BackscatterMLAdapter, GenericTimeseriesAdapter, or custom.
 
     Returns:
-        Panel Column application with map, timeseries, metrics, and feature importance
+        Panel Column application with map, timeseries, and optional metrics/FI.
     """
-    # Initialize data index
-    index = DataIndex(config)
+    # Check for available groups
+    groups = adapter.groups()
 
-    if not index.splits:
+    if not groups:
         return pn.Column(
             pn.pane.Alert(
-                f"**Error:** No splits found in {config.root}. "
-                f"Ensure data directory contains split folders with metrics_global_plot subfolders.",
+                "**Error:** No groups found. "
+                "Ensure data directory contains valid data structure.",
                 alert_type="danger",
                 sizing_mode="stretch_width",
             )
         )
 
     # Pre-load coordinates
-    try:
-        coords = load_location_coordinates(config)
-    except Exception:
-        coords = None
+    coords = adapter.location_coordinates()
 
     # Per-session state
     state = {
-        "current_split": None,
+        "current_group": None,
         "current_variable": None,
         "selected_location_id": None,
         "map_data": None,
         "points_element": None,
         "highlight_stream": None,
-        "location_lookup": None,
         "updating_location_input": False,
         "last_plot_location_id": None,
         "var_spec_editor": None,
+        "ts_data": None,
+        "ts_location_id": None,
     }
 
     # =============================================================================
     # WIDGETS
     # =============================================================================
 
-    available_splits = find_splits(config)
-    split_select = pn.widgets.Select(
-        name="Split",
-        options={s: s for s in available_splits},
-        value=available_splits[-1] if available_splits else None,
+    group_select = pn.widgets.Select(
+        name="Group",
+        options={g: g for g in groups},
+        value=groups[-1] if groups else None,
     )
 
-    # Get variables for initial split
-    initial_variables = (
-        get_variable_names(config, split_select.value) if split_select.value else []
-    )
+    # Get variables for initial group
+    initial_variables = adapter.variables()
     variable_select = pn.widgets.Select(
         name="Variable",
         options=initial_variables,
@@ -153,74 +147,65 @@ def create_app(config: DataConfig) -> pn.Column:
     # HELPER FUNCTIONS
     # =============================================================================
 
-    def _get_map_data(split_dir: str, variable_name: str) -> pd.DataFrame:
+    def _get_map_data(group: str, variable_name: str) -> pd.DataFrame:
         """Load and prepare map data with coordinates."""
-        var_data = load_variable_data(config, split_dir, variable_name)
-        if coords is not None:
-            merged = var_data.merge(coords, on=config.id_column, how="left")
-            # Use actual column names from the merged dataframe
-            lon_cols = [c for c in merged.columns if c.startswith("lon")]
-            lat_cols = [c for c in merged.columns if c.startswith("lat")]
-            if lon_cols and lat_cols:
-                merged = merged.dropna(subset=[lon_cols[0], lat_cols[0]])
-            return merged
+        var_data = adapter.load_variable_data(variable_name)
+        if coords is not None and not var_data.empty:
+            # Merge with coordinates if needed
+            id_col = "location_id"
+            if id_col in var_data.columns and id_col in coords.columns:
+                merged = var_data.merge(coords, on=id_col, how="left")
+                lon_cols = [c for c in merged.columns if c.startswith("lon")]
+                lat_cols = [c for c in merged.columns if c.startswith("lat")]
+                if lon_cols and lat_cols:
+                    merged = merged.dropna(subset=[lon_cols[0], lat_cols[0]])
+                return merged
         return var_data
 
     def load_and_display_location_data(location_id: int):
         """Load and display timeseries, metrics, and feature importance for a location."""
         try:
-            split_dir = split_select.value
+            group = group_select.value
             map_data = state.get("map_data")
 
             if map_data is None:
                 return
 
-            matching = map_data[map_data[config.id_column] == location_id]
+            id_col = "location_id"
+            matching = map_data[map_data[id_col] == location_id]
             if matching.empty:
                 return
 
-            tile_id = None
-            try:
-                lookup = load_location_lookup(config)
-                loc_row = lookup[lookup[config.id_column] == location_id]
-                if not loc_row.empty:
-                    tile_id = loc_row[config.tile_col].iloc[0]
-            except Exception:
-                pass
+            # Get tile/group identifier
+            tile_id = adapter.resolve_tile(group, location_id)
 
-            if tile_id:
+            # Load data concurrently
+            ts_data = None
+            fi_data = None
+            metrics_data = None
+
+            if tile_id or True:  # Always try to load timeseries
                 with ThreadPoolExecutor(max_workers=3) as executor:
                     ts_future = executor.submit(
-                        load_timeseries_for_location,
-                        config,
-                        split_dir,
-                        location_id,
-                        tile_id,
+                        adapter.load_timeseries, group, location_id
                     )
                     fi_future = executor.submit(
-                        load_feature_importance_for_location,
-                        config,
-                        split_dir,
-                        location_id,
-                        tile_id,
+                        adapter.feature_importance, group, location_id, tile_id
                     )
                     metrics_future = executor.submit(
-                        load_metrics_from_tile, config, split_dir, tile_id, location_id
+                        adapter.metrics, group, location_id, tile_id
                     )
 
                     ts_data = ts_future.result()
                     fi_data = fi_future.result()
                     metrics_data = metrics_future.result()
-            else:
-                ts_data = None
-                fi_data = None
-                metrics_data = None
 
-            if ts_data is not None and not ts_data.empty:
+            has_timeseries = ts_data is not None and not ts_data.empty
+
+            if has_timeseries:
                 # Cache ts_data for config-driven replot
                 state["ts_data"] = ts_data
                 state["ts_location_id"] = location_id
-                state["ts_tile_id"] = tile_id
 
                 # Get var_specs from editor
                 var_spec_editor = state.get("var_spec_editor")
@@ -228,13 +213,13 @@ def create_app(config: DataConfig) -> pn.Column:
                     var_spec_editor.to_var_specs() if var_spec_editor else None
                 )
 
-                # Plot timeseries using plotting_joseph
+                # Plot timeseries
                 figs = plot_location_timeseries(
                     data=ts_data,
                     location_ids=[location_id],
                     var_specs=var_specs,
                     time_col="time",
-                    location_id_col=config.id_column,
+                    location_id_col=id_col,
                     figsize=(10, 5),
                     font_scale=1.0,
                     show_plot=False,
@@ -246,28 +231,31 @@ def create_app(config: DataConfig) -> pn.Column:
                     timeseries_pane.append(timeseries_plot)
                     state["last_plot_location_id"] = location_id
 
+                # Display metrics if available
                 if metrics_data:
+                    # Use default metric models config if adapter doesn't provide one
+                    from .config import DataConfig
+                    default_config = DataConfig(root=adapter.root if hasattr(adapter, 'root') else None)
                     metrics_table = create_metrics_table(
-                        metrics_data, config.metric_models
+                        metrics_data, default_config.metric_models
                     )
                     metrics_table_pane.clear()
                     metrics_table_pane.append(metrics_table)
                 else:
                     metrics_table_pane.clear()
                     metrics_table_pane.append(
-                        pn.pane.Markdown("No metrics data available")
+                        pn.pane.Markdown("Metrics not available for this dataset")
                     )
 
+                # Display feature importance if available
                 if fi_data:
-                    fi_plot = create_feature_importance_plot(
-                        fi_data, config.fi_col_prefix
-                    )
+                    fi_plot = create_feature_importance_plot(fi_data, "fi_")
                     feature_importance_pane.clear()
                     feature_importance_pane.append(fi_plot)
                 else:
                     feature_importance_pane.clear()
                     feature_importance_pane.append(
-                        pn.pane.Markdown("Select a location to view feature importance")
+                        pn.pane.Markdown("Feature importance not available for this dataset")
                     )
             else:
                 state["last_plot_location_id"] = None
@@ -318,13 +306,13 @@ def create_app(config: DataConfig) -> pn.Column:
             var_spec_editor.to_var_specs() if var_spec_editor else None
         )
 
-        # Plot timeseries using plotting_joseph
+        # Plot timeseries
         figs = plot_location_timeseries(
             data=ts_data,
             location_ids=[location_id],
             var_specs=var_specs,
             time_col="time",
-            location_id_col=config.id_column,
+            location_id_col="location_id",
             figsize=(10, 5),
             font_scale=1.0,
             show_plot=False,
@@ -343,21 +331,22 @@ def create_app(config: DataConfig) -> pn.Column:
         if location_id is None or map_data is None:
             return hv.Overlay([])
 
-        row = map_data.loc[map_data[config.id_column] == location_id]
-        if row.empty:
+        id_col = "location_id"
+        matching = map_data.loc[map_data[id_col] == location_id]
+        if matching.empty:
             return hv.Overlay([])
 
         h_df = pd.DataFrame(
             {
-                lon_col: [float(row[lon_col].iloc[0])],
-                lat_col: [float(row[lat_col].iloc[0])],
-                config.id_column: [location_id],
+                lon_col: [float(matching[lon_col].iloc[0])],
+                lat_col: [float(matching[lat_col].iloc[0])],
+                id_col: [location_id],
             }
         )
 
         # Create a more visible highlight with multiple rings
         outer_ring = gv.Points(
-            h_df, kdims=[lon_col, lat_col], vdims=[config.id_column]
+            h_df, kdims=[lon_col, lat_col], vdims=[id_col]
         ).opts(
             size=30,
             color="red",
@@ -369,7 +358,7 @@ def create_app(config: DataConfig) -> pn.Column:
             tools=[],
         )
         middle_ring = gv.Points(
-            h_df, kdims=[lon_col, lat_col], vdims=[config.id_column]
+            h_df, kdims=[lon_col, lat_col], vdims=[id_col]
         ).opts(
             size=20,
             color="red",
@@ -381,7 +370,7 @@ def create_app(config: DataConfig) -> pn.Column:
             tools=[],
         )
         inner_dot = gv.Points(
-            h_df, kdims=[lon_col, lat_col], vdims=[config.id_column]
+            h_df, kdims=[lon_col, lat_col], vdims=[id_col]
         ).opts(
             size=12,
             color="red",
@@ -407,6 +396,7 @@ def create_app(config: DataConfig) -> pn.Column:
         def on_selection_update(index):
             """Update UI elements when selection changes."""
             map_data = state.get("map_data")
+            id_col = "location_id"
             if map_data is None or index is None or len(index) == 0:
                 state["selected_location_id"] = None
                 location_input.value = None
@@ -427,7 +417,7 @@ def create_app(config: DataConfig) -> pn.Column:
                 )
                 return
 
-            location_id = int(map_data.iloc[index[0]][config.id_column])
+            location_id = int(map_data.iloc[index[0]][id_col])
             state["selected_location_id"] = location_id
 
             state["updating_location_input"] = True
@@ -445,13 +435,13 @@ def create_app(config: DataConfig) -> pn.Column:
     # MAP CREATION
     # =============================================================================
 
-    def create_map(split_dir: str, variable_name: str):
+    def create_map(group: str, variable_name: str):
         """Create the initial map with all layers."""
         loading_indicator.value = True
 
         try:
             # Load data
-            map_data = _get_map_data(split_dir, variable_name)
+            map_data = _get_map_data(group, variable_name)
 
             if map_data.empty:
                 return hv.Text(0, 0, "No data available")
@@ -461,8 +451,9 @@ def create_app(config: DataConfig) -> pn.Column:
             # Determine actual column names
             lon_cols = [c for c in map_data.columns if c.startswith("lon")]
             lat_cols = [c for c in map_data.columns if c.startswith("lat")]
-            actual_lon = lon_cols[0] if lon_cols else config.lon_col
-            actual_lat = lat_cols[0] if lat_cols else config.lat_col
+            actual_lon = lon_cols[0] if lon_cols else "lon"
+            actual_lat = lat_cols[0] if lat_cols else "lat"
+            id_col = "location_id"
 
             # Compute color limits
             vmin, vmax = _auto_clim(map_data[variable_name].values)
@@ -471,7 +462,7 @@ def create_app(config: DataConfig) -> pn.Column:
             points = gv.Points(
                 map_data,
                 kdims=[actual_lon, actual_lat],
-                vdims=[config.id_column, variable_name],
+                vdims=[id_col, variable_name],
             ).opts(
                 color=variable_name,
                 cmap="viridis",
@@ -482,11 +473,11 @@ def create_app(config: DataConfig) -> pn.Column:
                 tools=["tap", "hover", "box_zoom", "wheel_zoom", "reset"],
                 colorbar=True,
                 clim=(vmin, vmax),
-                title=f"{variable_name} - {split_dir}",
+                title=f"{variable_name} - {group}",
                 active_tools=["wheel_zoom"],
                 hooks=[add_dynamic_sizing],
                 hover_tooltips=[
-                    ("Location ID", f"@{config.id_column}"),
+                    ("Location ID", f"@{id_col}"),
                     ("Value", f"@{variable_name}"),
                     ("Lon", f"@{actual_lon}"),
                     ("Lat", f"@{actual_lat}"),
@@ -510,7 +501,7 @@ def create_app(config: DataConfig) -> pn.Column:
             def update_highlight(index):
                 """Update highlight based on selection."""
                 if index and len(index) > 0:
-                    location_id = int(map_data.iloc[index[0]][config.id_column])
+                    location_id = int(map_data.iloc[index[0]][id_col])
                     state["selected_location_id"] = location_id
                     return _make_highlight(
                         location_id, map_data, actual_lon, actual_lat
@@ -539,7 +530,7 @@ def create_app(config: DataConfig) -> pn.Column:
     # DATA UPDATE
     # =============================================================================
 
-    def update_map_data(split_dir: str, variable_name: str):
+    def update_map_data(group: str, variable_name: str):
         """Update map data without re-creating the plot."""
         loading_indicator.value = True
 
@@ -562,7 +553,7 @@ def create_app(config: DataConfig) -> pn.Column:
                 pass
 
             # Load new data
-            map_data = _get_map_data(split_dir, variable_name)
+            map_data = _get_map_data(group, variable_name)
 
             if map_data.empty:
                 map_pane.object = hv.Text(0, 0, "No data available")
@@ -573,8 +564,9 @@ def create_app(config: DataConfig) -> pn.Column:
             # Determine actual column names
             lon_cols = [c for c in map_data.columns if c.startswith("lon")]
             lat_cols = [c for c in map_data.columns if c.startswith("lat")]
-            actual_lon = lon_cols[0] if lon_cols else config.lon_col
-            actual_lat = lat_cols[0] if lat_cols else config.lat_col
+            actual_lon = lon_cols[0] if lon_cols else "lon"
+            actual_lat = lat_cols[0] if lat_cols else "lat"
+            id_col = "location_id"
 
             # Compute new color limits
             vmin, vmax = _auto_clim(map_data[variable_name].values)
@@ -583,7 +575,7 @@ def create_app(config: DataConfig) -> pn.Column:
             points = gv.Points(
                 map_data,
                 kdims=[actual_lon, actual_lat],
-                vdims=[config.id_column, variable_name],
+                vdims=[id_col, variable_name],
             ).opts(
                 color=variable_name,
                 cmap="viridis",
@@ -594,11 +586,11 @@ def create_app(config: DataConfig) -> pn.Column:
                 tools=["tap", "hover", "box_zoom", "wheel_zoom", "reset"],
                 colorbar=True,
                 clim=(vmin, vmax),
-                title=f"{variable_name} - {split_dir}",
+                title=f"{variable_name} - {group}",
                 active_tools=["wheel_zoom"],
                 hooks=[add_dynamic_sizing],
                 hover_tooltips=[
-                    ("Location ID", f"@{config.id_column}"),
+                    ("Location ID", f"@{id_col}"),
                     ("Value", f"@{variable_name}"),
                     ("Lon", f"@{actual_lon}"),
                     ("Lat", f"@{actual_lat}"),
@@ -616,7 +608,7 @@ def create_app(config: DataConfig) -> pn.Column:
 
             def update_highlight(index):
                 if index and len(index) > 0:
-                    location_id = int(map_data.iloc[index[0]][config.id_column])
+                    location_id = int(map_data.iloc[index[0]][id_col])
                     state["selected_location_id"] = location_id
                     return _make_highlight(
                         location_id, map_data, actual_lon, actual_lat
@@ -658,7 +650,7 @@ def create_app(config: DataConfig) -> pn.Column:
             if saved_location_id is not None:
                 try:
                     matching_rows = map_data[
-                        map_data[config.id_column] == saved_location_id
+                        map_data[id_col] == saved_location_id
                     ]
                     if not matching_rows.empty:
                         new_index = matching_rows.index[0]
@@ -674,12 +666,11 @@ def create_app(config: DataConfig) -> pn.Column:
     # CALLBACKS
     # =============================================================================
 
-    def on_split_change(event):
-        """Handle split selection change."""
-        split_dir = event.new
+    def on_group_change(event):
+        """Handle group selection change."""
         state["last_plot_location_id"] = None
 
-        variables = get_variable_names(config, split_dir)
+        variables = adapter.variables()
         if variables:
             variable_select.options = variables
             variable_select.value = variables[0]
@@ -689,12 +680,12 @@ def create_app(config: DataConfig) -> pn.Column:
 
     def on_variable_change(event):
         """Handle variable selection change."""
-        split_dir = split_select.value
+        group = group_select.value
         variable_name = event.new
         state["last_plot_location_id"] = None
 
-        if split_dir and variable_name:
-            update_map_data(split_dir, variable_name)
+        if group and variable_name:
+            update_map_data(group, variable_name)
 
     def on_location_input_change(event):
         """Handle manual location ID input."""
@@ -708,7 +699,8 @@ def create_app(config: DataConfig) -> pn.Column:
         if state["map_data"] is None:
             return
 
-        matching = state["map_data"][state["map_data"][config.id_column] == location_id]
+        id_col = "location_id"
+        matching = state["map_data"][state["map_data"][id_col] == location_id]
 
         if matching.empty:
             info_pane.object = (
@@ -725,7 +717,7 @@ def create_app(config: DataConfig) -> pn.Column:
             highlight_stream.event(index=[pos])
 
     # Wire up callbacks
-    split_select.param.watch(on_split_change, "value")
+    group_select.param.watch(on_group_change, "value")
     variable_select.param.watch(on_variable_change, "value")
     location_input.param.watch(on_location_input_change, "value")
 
@@ -735,8 +727,8 @@ def create_app(config: DataConfig) -> pn.Column:
 
     # Initialize var_spec editor with available timeseries variables
     ts_variables = (
-        get_timeseries_variables(config, split_select.value)
-        if split_select.value
+        adapter.timeseries_variables(group_select.value)
+        if group_select.value
         else []
     )
 
@@ -756,8 +748,8 @@ def create_app(config: DataConfig) -> pn.Column:
     # INITIALIZATION
     # =============================================================================
 
-    if split_select.value and variable_select.value:
-        result = create_map(split_select.value, variable_select.value)
+    if group_select.value and variable_select.value:
+        result = create_map(group_select.value, variable_select.value)
         map_pane.object = result
 
     # =============================================================================
@@ -808,11 +800,11 @@ def create_app(config: DataConfig) -> pn.Column:
 
     return pn.Column(
         pn.pane.Markdown(
-            "# Backscatter Analysis Dataviewer",
+            "# Dataviewer Geo",
             sizing_mode="stretch_width",
         ),
         pn.Row(
-            split_select,
+            group_select,
             variable_select,
             location_input,
             loading_indicator,
@@ -823,3 +815,108 @@ def create_app(config: DataConfig) -> pn.Column:
         sizing_mode="stretch_width",
         styles={"margin": "0", "padding": "0"},
     )
+
+
+def create_app_from_config(config: DataConfig) -> pn.Column:
+    """Create app from DataConfig (backward compatibility).
+
+    This wraps the DataConfig in a BackscatterMLAdapter for existing users.
+
+    Args:
+        config: DataConfig instance pointing to backscatter ML data.
+
+    Returns:
+        Panel Column application.
+    """
+    from .datasets import BackscatterMLAdapter
+
+    adapter = BackscatterMLAdapter(config)
+    return create_app(adapter)
+
+
+_DUMMY_DATA_DIR = Path("/tmp/dataviewer_demo_data")
+
+
+def detect_data_format(data_path: Path) -> str:
+    """Detect data format based on directory structure.
+
+    Args:
+        data_path: Root directory of the dataset.
+
+    Returns:
+        'backscatter' if ML format detected, 'generic' otherwise.
+    """
+    data_path = Path(data_path)
+
+    # Check for backscatter ML format indicators
+    lookup_files = [
+        data_path / "ers_tile_id_location_id.parquet",
+        data_path / "lookup.parquet",
+    ]
+    has_lookup = any(f.exists() for f in lookup_files)
+
+    # Check for split directories with metrics
+    has_splits = False
+    if data_path.is_dir():
+        for item in data_path.iterdir():
+            if item.is_dir() and not item.name.startswith("."):
+                if (item / "metrics_global_plot").exists():
+                    has_splits = True
+                    break
+
+    if has_splits and has_lookup:
+        return "backscatter"
+
+    return "generic"
+
+
+def build_viewer(
+    data_root: Path | str | None = None,
+    data_format: str = "auto",
+) -> pn.Column:
+    """Build the viewer app for a data directory.
+
+    If ``data_root`` is None, a dummy dataset is generated automatically
+    in ``/tmp/dataviewer_demo_data`` so the app always runs out of the box.
+
+    Args:
+        data_root: Path to the dataset root. If None, dummy data is generated.
+        data_format: One of "auto", "backscatter", "generic".
+
+    Returns:
+        Panel Column application.
+    """
+    from .datasets import (
+        BackscatterMLAdapter,
+        GenericTimeseriesAdapter,
+        TimeseriesConfig,
+    )
+
+    if data_root is None:
+        print(
+            "No data path provided; generating a fresh dummy dataset at "
+            f"{_DUMMY_DATA_DIR}...",
+            flush=True,
+        )
+        data_root = _DUMMY_DATA_DIR
+        if data_root.exists():
+            import shutil
+
+            shutil.rmtree(data_root)
+        generate_dummy_data(data_root, n_locations=100, n_tiles=4)
+    else:
+        data_root = Path(data_root)
+
+    fmt = data_format
+    if fmt == "auto":
+        fmt = detect_data_format(data_root)
+        print(f"Auto-detected data format: {fmt}", flush=True)
+
+    if fmt == "backscatter":
+        config = DataConfig(root=data_root)
+        adapter = BackscatterMLAdapter(config)
+    else:
+        config = TimeseriesConfig(root=data_root)
+        adapter = GenericTimeseriesAdapter(config)
+
+    return create_app(adapter)

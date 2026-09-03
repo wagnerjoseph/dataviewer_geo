@@ -64,7 +64,7 @@ def main() -> None:
         seed=args.seed,
     )
 
-    print(f"\nData generated successfully!")
+    print("\nData generated successfully!")
     print(f"Lookup file: {config.lookup_path}")
     for split in config.root.iterdir():
         if split.is_dir() and not split.name.startswith("."):
