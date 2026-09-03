@@ -170,35 +170,40 @@ class VarSpecEditor(param.Parameterized):
         return used
 
     def _create_advanced_accordion(self, widgets: dict) -> pn.Accordion:
-        """Create collapsed, low-emphasis accordion with advanced options."""
-        row1 = pn.Row(
+        """Create a compact, collapsible 'Advanced' accordion.
+
+        Meant to sit inline (on the right) of a variable row. It collapses to a
+        small header and expands on click.
+        """
+        row1 = pn.FlexBox(
             widgets["line_width"],
             widgets["alpha"],
             widgets["plotstyle"],
             widgets["show_seasons"],
             widgets["interpolate"],
-            sizing_mode="stretch_width",
+            flex_wrap="wrap",
         )
-        row2 = pn.Row(
+        row2 = pn.FlexBox(
             widgets["lower_threshold_val"],
             widgets["lower_threshold_color"],
             widgets["upper_threshold_val"],
             widgets["upper_threshold_color"],
             widgets["apply_shading_to_all"],
-            sizing_mode="stretch_width",
+            flex_wrap="wrap",
         )
         content = pn.Column(
             row1,
             row2,
             sizing_mode="stretch_width",
-            margin=(0, 2),
+            margin=(2, 2),
         )
         return pn.Accordion(
-            (": Advanced", content),
+            ("Advanced", content),
             active=[],
             header_background="#f7f7f7",
-            sizing_mode="stretch_width",
-            margin=(2, 0, 4, 0),
+            width=170,
+            max_width=170,
+            margin=(0, 0, 0, 4),
         )
 
     def _refresh_layout(self):
@@ -209,17 +214,20 @@ class VarSpecEditor(param.Parameterized):
             subplot_num = sp_idx + 1
 
             primary = sp["primary"]
+            primary_advanced = self._create_advanced_accordion(primary)
             primary_row = pn.Row(
                 primary["name"],
                 primary["color"],
                 primary["label"],
+                primary_advanced,
+                align="end",
                 sizing_mode="stretch_width",
                 margin=(2, 0),
             )
-            primary_advanced = self._create_advanced_accordion(primary)
 
             overlay_rows = []
             for ov in sp["overlays"]:
+                ov_advanced = self._create_advanced_accordion(ov)
                 ov_row = pn.Row(
                     ov["name"],
                     ov["color"],
@@ -228,11 +236,12 @@ class VarSpecEditor(param.Parameterized):
                     ov["align_zero"],
                     ov["compute_corr"],
                     ov["remove_btn"],
+                    ov_advanced,
+                    align="end",
                     sizing_mode="stretch_width",
                     margin=(2, 0),
                 )
-                ov_advanced = self._create_advanced_accordion(ov)
-                overlay_rows.append(pn.Column(ov_row, ov_advanced, sizing_mode="stretch_width"))
+                overlay_rows.append(ov_row)
 
             add_var_btn = pn.widgets.Button(
                 label="+ Add variable",
@@ -270,7 +279,7 @@ class VarSpecEditor(param.Parameterized):
 
             card = pn.Column(
                 header,
-                pn.Column(primary_row, primary_advanced, sizing_mode="stretch_width"),
+                pn.Column(primary_row, sizing_mode="stretch_width"),
                 add_var_btn,
                 *overlay_rows,
                 styles={
