@@ -26,6 +26,7 @@ from .plotting import (
     plot_location_timeseries,
     create_feature_importance_plot,
     create_metrics_table,
+    add_dynamic_sizing,
 )
 from .var_spec_editor import VarSpecEditor
 
@@ -445,6 +446,7 @@ def create_app(config: DataConfig) -> pn.Column:
                 clim=(vmin, vmax),
                 title=f"{variable_name} - {split_dir}",
                 active_tools=["wheel_zoom"],
+                hooks=[add_dynamic_sizing],
                 hover_tooltips=[
                     ("Location ID", f"@{config.id_column}"),
                     ("Value", f"@{variable_name}"),
@@ -556,6 +558,7 @@ def create_app(config: DataConfig) -> pn.Column:
                 clim=(vmin, vmax),
                 title=f"{variable_name} - {split_dir}",
                 active_tools=["wheel_zoom"],
+                hooks=[add_dynamic_sizing],
                 hover_tooltips=[
                     ("Location ID", f"@{config.id_column}"),
                     ("Value", f"@{variable_name}"),
