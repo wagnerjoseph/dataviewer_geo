@@ -1,7 +1,5 @@
 """Tests for the Panel application."""
 
-import pytest
-
 from dataviewer_geo.app import create_app
 from dataviewer_geo.config import DataConfig
 
@@ -13,9 +11,9 @@ class TestCreateApp:
         """Test basic app creation."""
         app = create_app(data_config)
 
-        # Check that app is a Panel template
-        assert hasattr(app, "sidebar")
-        assert hasattr(app, "main")
+        # Check that app is a Panel Column
+        assert hasattr(app, "objects")
+        assert len(app.objects) > 0
 
     def test_app_has_widgets(self, data_config):
         """Test that app has required widgets."""
@@ -27,8 +25,16 @@ class TestCreateApp:
         assert app is not None
 
     def test_app_with_empty_data_raises(self, tmp_path):
-        """Test that app creation fails with no data."""
+        """Test that app creation fails gracefully with no data."""
         config = DataConfig(root=tmp_path)
+        app = create_app(config)
 
-        with pytest.raises(ValueError, match="No splits found"):
-            create_app(config)
+        # Should return an error message, not crash
+        assert app is not None
+        # Check for Alert pane
+        has_alert = any(
+            hasattr(obj, "object") and "Error" in str(obj.object)
+            for obj in app.objects
+            if hasattr(obj, "object")
+        )
+        assert has_alert

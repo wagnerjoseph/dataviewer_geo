@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from dataviewer_geo import DataConfig, create_app, generate_dummy_data
+from dataviewer_geo import DataConfig, create_app, generate_dummy_data, DataIndex
 
 # Generate dummy data for demonstration
 data_root = Path("/tmp/dataviewer_example_data")
@@ -14,20 +14,24 @@ generate_dummy_data(data_root, n_locations=100, n_tiles=4)
 config = DataConfig(root=data_root)
 
 # Discover available data
-from dataviewer_geo import DataIndex
-
 index = DataIndex(config)
 print(f"\nDiscovered {len(index.splits)} splits: {index.splits}")
-print(f"Map variables: {index.map_variables}")
-print(f"Timeseries variables: {index.timeseries_variables}")
 print(f"Locations: {len(index.locations)}")
 
 # Create the app
 print("\nCreating app...")
+print("The app includes:")
+print("  - Interactive map with OSM basemap")
+print("  - Split and variable selectors")
+print("  - Location ID input (or click on map)")
+print("  - Timeseries via plotting_joseph with var_specs editor")
+print("  - Feature importance bar charts")
+print("  - Metrics comparison table")
 app = create_app(config)
 
 # Display the app (opens in browser)
-print("Opening app in browser...")
+print("\nOpening app in browser...")
+print("(Expand 'Timeseries Configuration' to configure var_specs interactively)")
 app.show()
 
 # Or serve it programmatically:

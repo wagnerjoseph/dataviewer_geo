@@ -43,13 +43,13 @@ def main() -> None:
     else:
         data_path = args.data
 
-    # Create and configure the app
+    # Create configuration
     config = DataConfig(root=data_path)
-    app = create_app(config)
 
+    # Create the app
     print(f"\nStarting dataviewer_geo app...")
     print(f"Data directory: {data_path}")
-    print(f"Splits found: {app.sidebar}")
+    app = create_app(config)
 
     # Serve the app
     if args.show:

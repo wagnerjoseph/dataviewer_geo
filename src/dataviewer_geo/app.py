@@ -1,200 +1,783 @@
 """Interactive Panel application for dataviewer_geo."""
 
 import logging
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
 
 import panel as pn
 import pandas as pd
+import numpy as np
+import holoviews as hv
+import geoviews as gv
 
 from .config import DataConfig
-from .data import DataIndex, load_map_variable, load_timeseries_for_location
-from .plotting.maps import create_interactive_map
-from .plotting.timeseries import plot_location_timeseries
+from .data import (
+    DataIndex,
+    find_splits,
+    get_variable_names,
+    load_location_coordinates,
+    load_variable_data,
+    load_location_lookup,
+    load_timeseries_for_location,
+    load_feature_importance_for_location,
+    load_metrics_from_tile,
+    get_timeseries_variables,
+)
+from .plotting import (
+    plot_location_timeseries,
+    create_feature_importance_plot,
+    create_metrics_table,
+)
+from .var_spec_editor import VarSpecEditor
 
 logger = logging.getLogger(__name__)
 
 pn.extension()
+hv.extension("bokeh")
+gv.extension("bokeh")
 
 
-def create_app(config: DataConfig) -> pn.template.FastListTemplate:
+def create_app(config: DataConfig) -> pn.Column:
     """Create the interactive data viewer application.
 
     Args:
         config: DataConfig instance pointing to data root
 
     Returns:
-        Panel FastListTemplate application
+        Panel Column application with map, timeseries, metrics, and feature importance
     """
     # Initialize data index
     index = DataIndex(config)
 
     if not index.splits:
-        raise ValueError(f"No splits found in {config.root}")
+        return pn.Column(
+            pn.pane.Alert(
+                f"**Error:** No splits found in {config.root}. "
+                f"Ensure data directory contains split folders with metrics_global_plot subfolders.",
+                alert_type="danger",
+                sizing_mode="stretch_width",
+            )
+        )
 
-    # State management
+    # Pre-load coordinates
+    try:
+        coords = load_location_coordinates(config)
+    except Exception:
+        coords = None
+
+    # Per-session state
     state = {
+        "current_split": None,
+        "current_variable": None,
         "selected_location_id": None,
-        "selected_split": index.splits[0],
-        "selected_variable": index.map_variables[0] if index.map_variables else None,
+        "map_data": None,
+        "points_element": None,
+        "highlight_stream": None,
+        "location_lookup": None,
+        "updating_location_input": False,
+        "last_plot_location_id": None,
+        "var_spec_editor": None,
     }
 
-    # Widgets
+    # =============================================================================
+    # WIDGETS
+    # =============================================================================
+
+    available_splits = find_splits(config)
     split_select = pn.widgets.Select(
         name="Split",
-        options=index.splits,
-        value=state["selected_split"],
+        options={s: s for s in available_splits},
+        value=available_splits[-1] if available_splits else None,
     )
 
+    # Get variables for initial split
+    initial_variables = (
+        get_variable_names(config, split_select.value) if split_select.value else []
+    )
     variable_select = pn.widgets.Select(
         name="Variable",
-        options=index.map_variables if index.map_variables else ["No variables"],
-        value=state["selected_variable"],
+        options=initial_variables,
+        value=initial_variables[0] if initial_variables else None,
     )
 
-    location_select = pn.widgets.Select(
-        name="Location",
-        options=[],
+    location_input = pn.widgets.IntInput(
+        name="Location ID",
         value=None,
+        step=1,
     )
 
-    # Reactive data storage
-    def update_location_options(split: str) -> None:
-        """Update location dropdown based on selected split."""
-        locations_df = index.get_locations_for_split(split)
-        if locations_df is not None:
-            location_options = {
-                f"Loc {loc_id}": loc_id for loc_id in locations_df["location_id"].values[:1000]
-            }
-            location_select.options = location_options
-            if location_options:
-                location_select.value = next(iter(location_options.values()))
-        else:
-            location_select.options = []
-            location_select.value = None
+    loading_indicator = pn.indicators.LoadingSpinner(
+        value=False, size=25, name="Loading…"
+    )
 
-    def update_map(split: str, variable: str) -> Any:
-        """Update the map display."""
-        if not variable:
-            return None
+    # =============================================================================
+    # PANES
+    # =============================================================================
 
+    map_pane = pn.pane.HoloViews(
+        None,
+        sizing_mode="fixed",
+        styles={
+            "width": "50vw",
+            "height": "75vh",
+            "min-width": "50vw",
+            "max-width": "50vw",
+        },
+    )
+
+    timeseries_pane = pn.Column(
+        pn.pane.Markdown("**Click a location on the map to view timeseries**"),
+        sizing_mode="stretch_width",
+    )
+    timeseries_pane.min_height = 400
+
+    feature_importance_pane = pn.Column(
+        sizing_mode="fixed",
+        width=800,
+        margin=0,
+        styles={"padding": "0"},
+    )
+
+    metrics_table_pane = pn.Column(
+        sizing_mode="stretch_both",
+        margin=0,
+        styles={"padding": "0"},
+    )
+
+    info_pane = pn.pane.Markdown(
+        "**Status:** Ready - Select a location to view details",
+        sizing_mode="stretch_width",
+    )
+
+    # =============================================================================
+    # HELPER FUNCTIONS
+    # =============================================================================
+
+    def _get_map_data(split_dir: str, variable_name: str) -> pd.DataFrame:
+        """Load and prepare map data with coordinates."""
+        var_data = load_variable_data(config, split_dir, variable_name)
+        if coords is not None:
+            merged = var_data.merge(coords, on=config.id_column, how="left")
+            # Use actual column names from the merged dataframe
+            lon_cols = [c for c in merged.columns if c.startswith("lon")]
+            lat_cols = [c for c in merged.columns if c.startswith("lat")]
+            if lon_cols and lat_cols:
+                merged = merged.dropna(subset=[lon_cols[0], lat_cols[0]])
+            return merged
+        return var_data
+
+    def load_and_display_location_data(location_id: int):
+        """Load and display timeseries, metrics, and feature importance for a location."""
         try:
-            # Load map data for the variable
-            map_df_dict = load_map_variable(config, split, variable)
+            split_dir = split_select.value
+            map_data = state.get("map_data")
 
-            if isinstance(map_df_dict, dict):
-                # Combine all tiles
-                map_df = pd.concat(map_df_dict.values(), ignore_index=True)
+            if map_data is None:
+                return
+
+            matching = map_data[map_data[config.id_column] == location_id]
+            if matching.empty:
+                return
+
+            tile_id = None
+            try:
+                lookup = load_location_lookup(config)
+                loc_row = lookup[lookup[config.id_column] == location_id]
+                if not loc_row.empty:
+                    tile_id = loc_row[config.tile_col].iloc[0]
+            except Exception:
+                pass
+
+            if tile_id:
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    ts_future = executor.submit(
+                        load_timeseries_for_location,
+                        config,
+                        split_dir,
+                        location_id,
+                        tile_id,
+                    )
+                    fi_future = executor.submit(
+                        load_feature_importance_for_location,
+                        config,
+                        split_dir,
+                        location_id,
+                        tile_id,
+                    )
+                    metrics_future = executor.submit(
+                        load_metrics_from_tile, config, split_dir, tile_id, location_id
+                    )
+
+                    ts_data = ts_future.result()
+                    fi_data = fi_future.result()
+                    metrics_data = metrics_future.result()
             else:
-                map_df = map_df_dict
+                ts_data = None
+                fi_data = None
+                metrics_data = None
 
-            if map_df.empty:
-                logger.warning(f"No data found for {split}/{variable}")
-                return None
+            if ts_data is not None and not ts_data.empty:
+                # Skip re-render if same location
+                if state.get("last_plot_location_id") != location_id:
+                    # Get var_specs from editor
+                    var_spec_editor = state.get("var_spec_editor")
+                    var_specs = (
+                        var_spec_editor.to_var_specs() if var_spec_editor else None
+                    )
 
-            # Create interactive map
-            map_plot = create_interactive_map(
-                data=map_df,
-                variable=variable,
-                location_id_col="location_id",
-            )
+                    # Plot timeseries using plotting_joseph
+                    figs = plot_location_timeseries(
+                        data=ts_data,
+                        location_ids=[location_id],
+                        var_specs=var_specs,
+                        time_col="time",
+                        location_id_col=config.id_column,
+                        figsize=(10, 5),
+                        font_scale=1.0,
+                        show_plot=False,
+                    )
 
-            # Add tap callback
-            def tap_handler(event):
-                if event.y is not None:
-                    # Get clicked location
-                    points = map_plot.iloc[:, 0]
-                    distances = ((points.dimension_values(0) - event.x) ** 2 + (points.dimension_values(1) - event.y) ** 2) ** 0.5
-                    if len(distances) > 0:
-                        closest_idx = distances.argmin()
-                        location_id = points.dimension_values(2)[closest_idx]
-                        state["selected_location_id"] = location_id
-                        location_select.value = location_id
+                    if figs and len(figs) > 0:
+                        timeseries_plot = pn.pane.Matplotlib(figs[0], tight=True)
+                        timeseries_pane.clear()
+                        timeseries_pane.append(timeseries_plot)
+                        state["last_plot_location_id"] = location_id
 
-            map_plot.on_event("tap", tap_handler)
+                if metrics_data:
+                    metrics_table = create_metrics_table(
+                        metrics_data, config.metric_models
+                    )
+                    metrics_table_pane.clear()
+                    metrics_table_pane.append(metrics_table)
+                else:
+                    metrics_table_pane.clear()
+                    metrics_table_pane.append(
+                        pn.pane.Markdown("No metrics data available")
+                    )
 
-            return map_plot
+                if fi_data:
+                    fi_plot = create_feature_importance_plot(
+                        fi_data, config.fi_col_prefix
+                    )
+                    feature_importance_pane.clear()
+                    feature_importance_pane.append(fi_plot)
+                else:
+                    feature_importance_pane.clear()
+                    feature_importance_pane.append(
+                        pn.pane.Markdown("Select a location to view feature importance")
+                    )
+            else:
+                state["last_plot_location_id"] = None
+                timeseries_pane.clear()
+                timeseries_pane.append(
+                    pn.pane.Markdown(
+                        f"**No timeseries data found for location {location_id}**"
+                    )
+                )
+                metrics_table_pane.clear()
+                metrics_table_pane.append(
+                    pn.pane.Markdown("Select a location to view metrics")
+                )
+                feature_importance_pane.clear()
+                feature_importance_pane.append(
+                    pn.pane.Markdown("Select a location to view feature importance")
+                )
 
         except Exception as e:
-            logger.error(f"Error creating map: {e}")
-            return None
+            import traceback
 
-    def update_timeseries(location_id: int | None, split: str, variable: str) -> Any:
-        """Update the timeseries plot."""
-        if location_id is None:
-            return None
+            logger.error(f"Error loading location data: {e}\n{traceback.format_exc()}")
+            state["last_plot_location_id"] = None
+            error_msg = f"Error: {str(e)}"
+            timeseries_pane.clear()
+            timeseries_pane.append(pn.pane.Markdown(f"**Error:** {error_msg}"))
+            metrics_table_pane.clear()
+            metrics_table_pane.append(pn.pane.Markdown("Error loading metrics"))
+            feature_importance_pane.clear()
+            feature_importance_pane.append(
+                pn.pane.Markdown("Error loading feature importance")
+            )
+
+    def _make_highlight(
+        location_id: int, map_data: pd.DataFrame, lon_col: str, lat_col: str
+    ) -> hv.Overlay:
+        """Create highlight marker for selected location."""
+        if location_id is None or map_data is None:
+            return hv.Overlay([])
+
+        row = map_data.loc[map_data[config.id_column] == location_id]
+        if row.empty:
+            return hv.Overlay([])
+
+        h_df = pd.DataFrame(
+            {
+                lon_col: [float(row[lon_col].iloc[0])],
+                lat_col: [float(row[lat_col].iloc[0])],
+                config.id_column: [location_id],
+            }
+        )
+
+        # Create a more visible highlight with multiple rings
+        outer_ring = gv.Points(
+            h_df, kdims=[lon_col, lat_col], vdims=[config.id_column]
+        ).opts(
+            size=30,
+            color="red",
+            alpha=0.2,
+            line_color="red",
+            line_width=3,
+            line_alpha=0.5,
+            marker="circle",
+            tools=[],
+        )
+        middle_ring = gv.Points(
+            h_df, kdims=[lon_col, lat_col], vdims=[config.id_column]
+        ).opts(
+            size=20,
+            color="red",
+            alpha=0.3,
+            line_color="red",
+            line_width=2,
+            line_alpha=0.6,
+            marker="circle",
+            tools=[],
+        )
+        inner_dot = gv.Points(
+            h_df, kdims=[lon_col, lat_col], vdims=[config.id_column]
+        ).opts(
+            size=12,
+            color="red",
+            alpha=1.0,
+            line_color="white",
+            line_width=2,
+            marker="circle",
+            tools=[],
+        )
+
+        return outer_ring * middle_ring * inner_dot
+
+    def _auto_clim(values: np.ndarray) -> tuple[float, float]:
+        """Compute automatic color limits (2nd and 98th percentile)."""
+        valid = values[~np.isnan(values)]
+        if len(valid) == 0:
+            return (None, None)
+        return (float(np.percentile(valid, 2)), float(np.percentile(valid, 98)))
+
+    def create_on_selection_update():
+        """Create a shared selection update callback."""
+
+        def on_selection_update(index):
+            """Update UI elements when selection changes."""
+            map_data = state.get("map_data")
+            if map_data is None or index is None or len(index) == 0:
+                state["selected_location_id"] = None
+                location_input.value = None
+                info_pane.object = ""
+                timeseries_pane.clear()
+                timeseries_pane.append(
+                    pn.pane.Markdown(
+                        "**Click a location on the map to view timeseries**"
+                    )
+                )
+                metrics_table_pane.clear()
+                metrics_table_pane.append(
+                    pn.pane.Markdown("Select a location to view metrics")
+                )
+                feature_importance_pane.clear()
+                feature_importance_pane.append(
+                    pn.pane.Markdown("Select a location to view feature importance")
+                )
+                return
+
+            location_id = int(map_data.iloc[index[0]][config.id_column])
+            state["selected_location_id"] = location_id
+
+            state["updating_location_input"] = True
+            try:
+                location_input.value = location_id
+            finally:
+                state["updating_location_input"] = False
+
+            info_pane.object = f"**Selected Location ID:** `{location_id}`"
+            load_and_display_location_data(location_id)
+
+        return on_selection_update
+
+    # =============================================================================
+    # MAP CREATION
+    # =============================================================================
+
+    def create_map(split_dir: str, variable_name: str):
+        """Create the initial map with all layers."""
+        loading_indicator.value = True
 
         try:
-            # Load timeseries data
-            ts_df = load_timeseries_for_location(config, split, location_id)
+            # Load data
+            map_data = _get_map_data(split_dir, variable_name)
 
-            if ts_df.empty:
-                logger.warning(f"No timeseries data for location {location_id}")
-                return None
+            if map_data.empty:
+                return hv.Text(0, 0, "No data available")
 
-            # Plot timeseries
-            fig = plot_location_timeseries(
-                data=ts_df,
-                variables=variable,
-                location_id=location_id,
-                split_name=split,
+            state["map_data"] = map_data
+
+            # Determine actual column names
+            lon_cols = [c for c in map_data.columns if c.startswith("lon")]
+            lat_cols = [c for c in map_data.columns if c.startswith("lat")]
+            actual_lon = lon_cols[0] if lon_cols else config.lon_col
+            actual_lat = lat_cols[0] if lat_cols else config.lat_col
+
+            # Compute color limits
+            vmin, vmax = _auto_clim(map_data[variable_name].values)
+
+            # Create points layer
+            points = gv.Points(
+                map_data,
+                kdims=[actual_lon, actual_lat],
+                vdims=[config.id_column, variable_name],
+            ).opts(
+                color=variable_name,
+                cmap="viridis",
+                size=2,
+                width=800,
+                height=700,
+                responsive=True,
+                tools=["tap", "hover", "box_zoom", "wheel_zoom", "reset"],
+                colorbar=True,
+                clim=(vmin, vmax),
+                title=f"{variable_name} - {split_dir}",
+                active_tools=["wheel_zoom"],
+                hover_tooltips=[
+                    ("Location ID", f"@{config.id_column}"),
+                    ("Value", f"@{variable_name}"),
+                    ("Lon", f"@{actual_lon}"),
+                    ("Lat", f"@{actual_lat}"),
+                ],
             )
 
-            return fig
+            state["points_element"] = points
 
-        except Exception as e:
-            logger.error(f"Error creating timeseries: {e}")
-            return None
+            # Create highlight stream
+            highlight_stream = hv.streams.Selection1D(source=points)
+            state["highlight_stream"] = highlight_stream
 
-    # Callbacks
-    @pn.depends(split_select.param.value)
-    def on_split_change(split: str) -> None:
-        state["selected_split"] = split
-        update_location_options(split)
-        # Update variable options based on split
-        variable_select.options = index.map_variables if index.map_variables else ["No variables"]
+            # Create and store shared selection callback
+            if (
+                "on_selection_update" not in state
+                or state["on_selection_update"] is None
+            ):
+                state["on_selection_update"] = create_on_selection_update()
+            highlight_stream.add_subscriber(state["on_selection_update"])
 
-    @pn.depends(variable_select.param.value)
-    def on_variable_change(variable: str) -> None:
-        state["selected_variable"] = variable
+            def update_highlight(index):
+                """Update highlight based on selection."""
+                if index and len(index) > 0:
+                    location_id = int(map_data.iloc[index[0]][config.id_column])
+                    state["selected_location_id"] = location_id
+                    return _make_highlight(
+                        location_id, map_data, actual_lon, actual_lat
+                    )
+                else:
+                    state["selected_location_id"] = None
+                    return hv.Overlay([])
 
-    @pn.depends(location_select.param.value)
-    def on_location_change(location_id: int | None) -> None:
+            highlight_layer = hv.DynamicMap(
+                update_highlight, streams=[highlight_stream]
+            )
+
+            # Render with basemap
+            basemap = gv.tile_sources.OSM.opts(
+                alpha=0.6,
+                width=800,
+                height=700,
+                responsive=True,
+            )
+            return basemap * points * highlight_layer
+
+        finally:
+            loading_indicator.value = False
+
+    # =============================================================================
+    # DATA UPDATE
+    # =============================================================================
+
+    def update_map_data(split_dir: str, variable_name: str):
+        """Update map data without re-creating the plot."""
+        loading_indicator.value = True
+
+        try:
+            saved_location_id = state.get("selected_location_id")
+
+            # Capture current zoom ranges
+            saved_ranges = None
+            try:
+                if hasattr(map_pane, "_plots") and map_pane._plots:
+                    old_plot = list(map_pane._plots.values())[0]
+                    if hasattr(old_plot, "state"):
+                        saved_ranges = {
+                            "x_start": old_plot.state.x_range.start,
+                            "x_end": old_plot.state.x_range.end,
+                            "y_start": old_plot.state.y_range.start,
+                            "y_end": old_plot.state.y_range.end,
+                        }
+            except Exception:
+                pass
+
+            # Load new data
+            map_data = _get_map_data(split_dir, variable_name)
+
+            if map_data.empty:
+                map_pane.object = hv.Text(0, 0, "No data available")
+                return
+
+            state["map_data"] = map_data
+
+            # Determine actual column names
+            lon_cols = [c for c in map_data.columns if c.startswith("lon")]
+            lat_cols = [c for c in map_data.columns if c.startswith("lat")]
+            actual_lon = lon_cols[0] if lon_cols else config.lon_col
+            actual_lat = lat_cols[0] if lat_cols else config.lat_col
+
+            # Compute new color limits
+            vmin, vmax = _auto_clim(map_data[variable_name].values)
+
+            # Create new points element
+            points = gv.Points(
+                map_data,
+                kdims=[actual_lon, actual_lat],
+                vdims=[config.id_column, variable_name],
+            ).opts(
+                color=variable_name,
+                cmap="viridis",
+                size=2,
+                width=800,
+                height=700,
+                responsive=True,
+                tools=["tap", "hover", "box_zoom", "wheel_zoom", "reset"],
+                colorbar=True,
+                clim=(vmin, vmax),
+                title=f"{variable_name} - {split_dir}",
+                active_tools=["wheel_zoom"],
+                hover_tooltips=[
+                    ("Location ID", f"@{config.id_column}"),
+                    ("Value", f"@{variable_name}"),
+                    ("Lon", f"@{actual_lon}"),
+                    ("Lat", f"@{actual_lat}"),
+                ],
+            )
+
+            state["points_element"] = points
+
+            # Create new highlight stream
+            highlight_stream = hv.streams.Selection1D(source=points)
+            state["highlight_stream"] = highlight_stream
+
+            if "on_selection_update" in state:
+                highlight_stream.add_subscriber(state["on_selection_update"])
+
+            def update_highlight(index):
+                if index and len(index) > 0:
+                    location_id = int(map_data.iloc[index[0]][config.id_column])
+                    state["selected_location_id"] = location_id
+                    return _make_highlight(
+                        location_id, map_data, actual_lon, actual_lat
+                    )
+                else:
+                    state["selected_location_id"] = None
+                    return hv.Overlay([])
+
+            highlight_layer = hv.DynamicMap(
+                update_highlight, streams=[highlight_stream]
+            )
+
+            basemap = gv.tile_sources.OSM.opts(
+                alpha=0.6,
+                width=800,
+                height=700,
+                responsive=True,
+            )
+            map_pane.object = basemap * points * highlight_layer
+
+            # Restore zoom ranges
+            if saved_ranges:
+
+                def restore_ranges():
+                    try:
+                        if hasattr(map_pane, "_plots") and map_pane._plots:
+                            bokeh_plot = list(map_pane._plots.values())[0]
+                            if hasattr(bokeh_plot, "state"):
+                                bokeh_plot.state.x_range.start = saved_ranges["x_start"]
+                                bokeh_plot.state.x_range.end = saved_ranges["x_end"]
+                                bokeh_plot.state.y_range.start = saved_ranges["y_start"]
+                                bokeh_plot.state.y_range.end = saved_ranges["y_end"]
+                    except Exception:
+                        pass
+
+                pn.state.onload(restore_ranges)
+
+            # Restore location selection
+            if saved_location_id is not None:
+                try:
+                    matching_rows = map_data[
+                        map_data[config.id_column] == saved_location_id
+                    ]
+                    if not matching_rows.empty:
+                        new_index = matching_rows.index[0]
+                        pos = map_data.index.get_loc(new_index)
+                        highlight_stream.event(index=[pos])
+                except Exception:
+                    pass
+
+        finally:
+            loading_indicator.value = False
+
+    # =============================================================================
+    # CALLBACKS
+    # =============================================================================
+
+    def on_split_change(event):
+        """Handle split selection change."""
+        split_dir = event.new
+        state["last_plot_location_id"] = None
+
+        variables = get_variable_names(config, split_dir)
+        if variables:
+            variable_select.options = variables
+            variable_select.value = variables[0]
+        else:
+            variable_select.options = []
+            variable_select.value = None
+
+    def on_variable_change(event):
+        """Handle variable selection change."""
+        split_dir = split_select.value
+        variable_name = event.new
+        state["last_plot_location_id"] = None
+
+        if split_dir and variable_name:
+            update_map_data(split_dir, variable_name)
+
+    def on_location_input_change(event):
+        """Handle manual location ID input."""
+        if state.get("updating_location_input", False):
+            return
+
+        location_id = event.new
+        if location_id is None:
+            return
+
+        if state["map_data"] is None:
+            return
+
+        matching = state["map_data"][state["map_data"][config.id_column] == location_id]
+
+        if matching.empty:
+            info_pane.object = (
+                f"**Error:** Location ID `{location_id}` not found in current view"
+            )
+            return
+
         state["selected_location_id"] = location_id
+        info_pane.object = f"**Selected Location ID:** `{location_id}`"
 
-    # Create layout
-    map_panel = pn.bind(update_map, split_select, variable_select)
-    timeseries_panel = pn.bind(
-        update_timeseries, location_select, split_select, variable_select
+        highlight_stream = state.get("highlight_stream")
+        if highlight_stream is not None:
+            pos = state["map_data"].index.get_loc(matching.index[0])
+            highlight_stream.event(index=[pos])
+
+    # Wire up callbacks
+    split_select.param.watch(on_split_change, "value")
+    variable_select.param.watch(on_variable_change, "value")
+    location_input.param.watch(on_location_input_change, "value")
+
+    # =============================================================================
+    # VAR SPEC EDITOR
+    # =============================================================================
+
+    # Initialize var_spec editor with available timeseries variables
+    ts_variables = (
+        get_timeseries_variables(config, split_select.value)
+        if split_select.value
+        else []
+    )
+    var_spec_editor = VarSpecEditor(available_variables=ts_variables)
+    # Add default variables
+    for var in ts_variables[:3]:  # Add first 3 variables by default
+        var_spec_editor.add_var(var)
+    state["var_spec_editor"] = var_spec_editor
+
+    var_spec_pane = pn.Column(
+        pn.pane.Markdown("### Timeseries Configuration"),
+        var_spec_editor.render(),
+        sizing_mode="stretch_width",
     )
 
-    # Main layout
-    sidebar = pn.Column(
-        pn.pane.Markdown("## Data Viewer"),
-        pn.pane.Markdown("### Controls"),
-        split_select,
-        variable_select,
-        location_select,
-        pn.pane.Markdown("### Instructions"),
+    # =============================================================================
+    # INITIALIZATION
+    # =============================================================================
+
+    if split_select.value and variable_select.value:
+        result = create_map(split_select.value, variable_select.value)
+        map_pane.object = result
+
+    # =============================================================================
+    # LAYOUT
+    # =============================================================================
+
+    bottom_row = pn.Row(
+        metrics_table_pane,
+        feature_importance_pane,
+        sizing_mode="fixed",
+        height=420,
+        styles={
+            "width": "100%",
+            "gap": "10px",
+        },
+        margin=0,
+    )
+
+    right_column = pn.Column(
+        timeseries_pane,
+        bottom_row,
+        sizing_mode="fixed",
+        styles={
+            "width": "50vw",
+            "height": "78vh",
+            "min-width": "50vw",
+            "max-width": "50vw",
+            "overflow-y": "auto",
+        },
+    )
+
+    main_layout = pn.Row(
+        map_pane,
+        right_column,
+        sizing_mode="fixed",
+        styles={
+            "width": "100vw",
+            "margin": "0",
+            "padding": "0",
+        },
+    )
+
+    # Collapsible var_spec editor panel
+    var_spec_accordion = pn.Accordion(
+        ("Timeseries Configuration", var_spec_pane),
+        active=[],
+    )
+
+    return pn.Column(
         pn.pane.Markdown(
-            """
-            1. Select a **split** (time period)
-            2. Choose a **variable** to display
-            3. Click on a point on the map or use the **location** dropdown
-            4. View the **timeseries** for the selected location
-            """
+            "# Backscatter Analysis Dataviewer",
+            sizing_mode="stretch_width",
         ),
+        pn.Row(
+            split_select,
+            variable_select,
+            location_input,
+            loading_indicator,
+        ),
+        info_pane,
+        var_spec_accordion,
+        main_layout,
+        sizing_mode="stretch_width",
+        styles={"margin": "0", "padding": "0"},
     )
-
-    main_area = pn.Row(
-        pn.Column(map_panel, height=600),
-        pn.Column(timeseries_panel, height=600),
-    )
-
-    app = pn.template.FastListTemplate(
-        title="Data Viewer",
-        sidebar=sidebar,
-        main=main_area,
-        header_background="#2c3e50",
-    )
-
-    return app

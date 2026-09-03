@@ -1,11 +1,6 @@
-"""Timeseries plotting for dataviewer_geo.
-
-Wraps plotting_joseph's plot_time_series function for integration with Panel.
-"""
+"""Timeseries plotting using plotting_joseph."""
 
 import logging
-
-import matplotlib.pyplot as plt
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -13,26 +8,32 @@ logger = logging.getLogger(__name__)
 
 def plot_location_timeseries(
     data: pd.DataFrame,
-    variables: list[str] | str | None = None,
+    location_ids: list[int],
+    var_specs: list[dict] | None = None,
     time_col: str = "time",
-    location_id: int | str | None = None,
-    split_name: str | None = None,
-    **kwargs,
-) -> plt.Figure:
-    """Plot timeseries data for a location.
-
-    Wrapper around plotting_joseph's plot_time_series function.
+    location_id_col: str = "location_id",
+    figsize: tuple[int, int] = (10, 5),
+    font_scale: float = 1.0,
+    show_plot: bool = False,
+    save_dir: str | None = None,
+    master_lookup: str | None = None,
+) -> list:
+    """Plot timeseries data using plotting_joseph.plot_time_series.
 
     Args:
-        data: DataFrame with time column and variable columns
-        variables: Variable name(s) to plot (if None, plots all numeric columns)
+        data: DataFrame with location_id, time, and variable columns
+        location_ids: List of location IDs to plot
+        var_specs: Variable specifications for plotting_joseph (see var_spec_editor)
         time_col: Name of time column
-        location_id: Optional location ID for title
-        split_name: Optional split name for title
-        **kwargs: Additional arguments passed to plotting_joseph.plot_time_series
+        location_id_col: Name of location ID column
+        figsize: Base figure size
+        font_scale: Font size scale factor
+        show_plot: Whether to display plots interactively
+        save_dir: Directory to save figures
+        master_lookup: Path to master lookup for country/neighbor data
 
     Returns:
-        Matplotlib Figure object
+        List of matplotlib Figure objects (one per location)
     """
     try:
         from plotting_joseph import plot_time_series
@@ -45,37 +46,26 @@ def plot_location_timeseries(
     # Prepare data
     df = data.copy()
     if time_col not in df.columns:
-        raise ValueError(f"Time column '{time_col}' not found in data. Available: {df.columns.tolist()}")
+        raise ValueError(
+            f"Time column '{time_col}' not found. Available: {df.columns.tolist()}"
+        )
+    if location_id_col not in df.columns:
+        raise ValueError(f"Location ID column '{location_id_col}' not found")
 
     # Ensure time is datetime
     if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
         df[time_col] = pd.to_datetime(df[time_col])
 
-    # Select variables
-    if variables is None:
-        # Get all numeric columns except time
-        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-        variables = [c for c in numeric_cols if c != time_col]
-    elif isinstance(variables, str):
-        variables = [variables]
-
-    # Filter to available variables
-    available_vars = [v for v in variables if v in df.columns]
-    if not available_vars:
-        raise ValueError(f"No variables found in data. Requested: {variables}, Available: {df.columns.tolist()}")
-
-    # Build title
-    title_parts = []
-    if location_id is not None:
-        title_parts.append(f"Location {location_id}")
-    if split_name:
-        title_parts.append(f"({split_name})")
-
     # Call plotting_joseph's function
-    fig = plot_time_series(
+    figs = plot_time_series(
         data=df,
-        location_ids=[location_id] if location_id is not None else None,
-        **kwargs,
+        var_specs=var_specs,
+        location_ids=location_ids,
+        figsize=figsize,
+        font_scale=font_scale,
+        show_plot=show_plot,
+        save_dir=save_dir,
+        master_lookup=master_lookup,
     )
 
-    return fig
+    return figs

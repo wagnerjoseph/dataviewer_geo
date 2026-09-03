@@ -47,18 +47,6 @@ def main() -> None:
         default=42,
         help="Random seed for reproducibility",
     )
-    parser.add_argument(
-        "--start-date",
-        type=str,
-        default="2020-01-01",
-        help="Start date for timeseries (YYYY-MM-DD)",
-    )
-    parser.add_argument(
-        "--end-date",
-        type=str,
-        default="2023-12-31",
-        help="End date for timeseries (YYYY-MM-DD)",
-    )
 
     args = parser.parse_args()
 
@@ -66,7 +54,6 @@ def main() -> None:
     print(f"  Locations: {args.locations}")
     print(f"  Tiles: {args.tiles}")
     print(f"  Splits: {args.splits or 'default'}")
-    print(f"  Date range: {args.start_date} to {args.end_date}")
     print(f"  Seed: {args.seed}")
 
     config = generate_dummy_data(
@@ -75,13 +62,13 @@ def main() -> None:
         n_tiles=args.tiles,
         splits=args.splits,
         seed=args.seed,
-        start_date=args.start_date,
-        end_date=args.end_date,
     )
 
     print(f"\nData generated successfully!")
     print(f"Lookup file: {config.lookup_path}")
-    print(f"Splits: {config.root.glob('*/*/')}")
+    for split in config.root.iterdir():
+        if split.is_dir() and not split.name.startswith("."):
+            print(f"  Split: {split.name}")
 
 
 if __name__ == "__main__":

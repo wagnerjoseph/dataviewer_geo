@@ -1,13 +1,15 @@
 # dataviewer_geo
 
-Interactive geospatial timeseries data viewer for Earth observation data.
+Interactive geospatial timeseries data viewer for Earth observation data with integrated ML model evaluation.
 
 ## Features
 
-- **Interactive Map**: GeoViews-based map with clickable points for location selection
-- **Timeseries Display**: Integrated with `plotting_joseph` for publication-quality timeseries plots
-- **Auto-Discovery**: Automatically discovers splits, variables, and locations from data files
-- **Panel UI**: Clean, responsive web interface built with Panel
+- **Interactive Map**: GeoViews-based map with OSM basemap, clickable points, and highlight markers
+- **Timeseries Visualization**: Multi-panel timeseries via `plotting_joseph` with configurable `var_specs`
+- **Interactive var_specs Editor**: Configure timeseries plots without code - add variables, overlays, secondary axes, thresholds, seasons, correlations via Panel widgets
+- **Feature Importance**: Horizontal bar charts for ML model feature importance
+- **Metrics Table**: 3×3 comparison table (RMSE, MAE, Pearson) with best values starred
+- **Auto-Discovery**: Automatically discovers splits, variables, and locations from parquet files
 
 ## Installation
 
@@ -29,44 +31,14 @@ uv pip install -e .
 
 ```python
 from pathlib import Path
-from dataviewer_geo import generate_dummy_data, create_app
+from dataviewer_geo import generate_dummy_data, create_app, DataConfig
 
 # Generate sample data
 data_root = Path("/tmp/test_data")
 generate_dummy_data(data_root, n_locations=100, n_tiles=4)
 
 # Create and launch the app
-from dataviewer_geo.config import DataConfig
 config = DataConfig(root=data_root)
-app = create_app(config)
-app.servable()
-```
-
-### Using Your Own Data
-
-Structure your data as follows:
-
-```
-data_root/
-├── lookup.parquet            # location_id, lat, lon, tile_id
-├── split_1/
-│   ├── map/
-│   │   ├── tile_0.parquet    # location_id, lat, lon, var1, var2, ...
-│   │   └── tile_1.parquet
-│   └── timeseries/
-│       ├── tile_0.parquet    # location_id, time, var1, var2, ...
-│       └── tile_1.parquet
-└── split_2/
-    ├── map/
-    │   └── ...
-    └── timeseries/
-        └── ...
-```
-
-```python
-from dataviewer_geo import DataConfig, create_app
-
-config = DataConfig(root=Path("/path/to/your/data"))
 app = create_app(config)
 app.servable()
 ```
@@ -77,16 +49,73 @@ app.servable()
 # Serve the app
 panel serve scripts/run_app.py --show
 
-# Or programmatically
-python -c "from dataviewer_geo import create_app, DataConfig; app = create_app(DataConfig('/path/to/data')); app.show()"
+# Or with custom data
+python scripts/run_app.py --data /path/to/data/dataviewer
 ```
+
+## Data Structure
+
+The app expects data in the following structure:
+
+```
+data_root/
+├── ers_tile_id_location_id.parquet    # location_id, lat, lon, tile_id
+├── split_1/
+│   ├── metrics_global_plot/
+│   │   ├── rmse.parquet               # location_id, rmse
+│   │   ├── mae.parquet                # location_id, mae
+│   │   └── pearson.parquet            # location_id, pearson
+│   ├── metrics_by_tile/
+│   │   ├── 0001.parquet               # location_id + 9 metric columns
+│   │   └── ...
+│   ├── feature_importance/
+│   │   ├── without_lag/
+│   │   │   ├── 0001.parquet           # location_id, fi_feature1, fi_feature2, ...
+│   │   │   └── ...
+│   │   └── with_lag/
+│   │       └── ...
+│   └── timeseries/
+│       ├── 0001.parquet               # location_id, time, backscatter40, lai, swvl1, predictions
+│       └── ...
+└── split_2/
+    └── ...
+```
+
+## Using the var_specs Editor
+
+The var_specs editor lets you configure timeseries plots interactively:
+
+1. **Add Variables**: Click "Add Variable" to add a new panel
+2. **Configure Each Variable**:
+   - **Name**: Select the data column to plot
+   - **Label**: Display label for y-axis
+   - **Color**: Line color
+   - **Line Width/Alpha**: Styling
+   - **Plot Style**: line, points, or both
+   - **Show Seasons**: Overlay JJA/DJF markers
+   - **Interpolate**: Interpolate NaN values
+3. **Overlays**: Set "Overlay On" to add a variable to an existing panel
+4. **Secondary Axis**: Check "Add Second Y-Axis" for overlays
+5. **Thresholds**: Set lower/upper threshold values and colors for shading
+6. **Correlation**: Check "Show Correlation" to display Pearson+Spearman correlation
+
+The editor generates a `var_specs` list that is passed to `plotting_joseph.plot_time_series`.
 
 ## API Reference
 
 ### Data Loading
 
 ```python
-from dataviewer_geo import DataIndex, DataConfig
+from dataviewer_geo import (
+    DataConfig,
+    DataIndex,
+    find_splits,
+    get_variable_names,
+    load_timeseries_for_location,
+    load_feature_importance_for_location,
+    load_metrics_from_tile,
+    get_timeseries_variables,
+)
 
 config = DataConfig(root="/path/to/data")
 index = DataIndex(config)
@@ -94,50 +123,80 @@ index = DataIndex(config)
 # Discover available splits
 print(index.splits)
 
-# Discover available variables
-print(index.map_variables)
-print(index.timeseries_variables)
-
-# Get locations for a split
-locations = index.get_locations_for_split("split_1")
-```
-
-### Loading Data
-
-```python
-from dataviewer_geo import load_map_variable, load_timeseries_for_location
-
-# Load map data
-map_data = load_map_variable(config, "split_1", "backscatter")
+# Get timeseries variables for var_specs editor
+ts_vars = get_timeseries_variables(config, "split_1")
 
 # Load timeseries for a location
-ts_data = load_timeseries_for_location(
-    config,
-    "split_1",
-    location_id=123,
-    variables=["backscatter", "lai"],
-)
+ts_data = load_timeseries_for_location(config, "split_1", location_id=123)
+```
+
+### var_specs Editor
+
+```python
+from dataviewer_geo import VarSpecEditor
+
+# Create editor with available variables
+editor = VarSpecEditor(available_variables=["backscatter40", "lai", "swvl1"])
+editor.add_var("backscatter40")
+editor.add_var("lai")
+
+# Configure via widgets
+editor._var_widgets[0]["label"].value = "Backscatter [dB]"
+editor._var_widgets[0]["color"].value = "#0000ff"
+
+# Collect var_specs for plotting
+var_specs = editor.to_var_specs()
 ```
 
 ### Plotting
 
 ```python
-from dataviewer_geo import create_interactive_map, plot_location_timeseries
-
-# Create interactive map
-map_plot = create_interactive_map(
-    data=map_df,
-    variable="backscatter",
-    width=800,
-    height=600,
+from dataviewer_geo.plotting import (
+    plot_location_timeseries,
+    create_feature_importance_plot,
+    create_metrics_table,
 )
 
-# Create timeseries plot
-fig = plot_location_timeseries(
-    data=ts_df,
-    variables=["backscatter", "lai"],
-    location_id=123,
-    split_name="split_1",
+# Plot timeseries with var_specs
+figs = plot_location_timeseries(
+    data=ts_data,
+    location_ids=[123],
+    var_specs=var_specs,
+)
+
+# Feature importance
+fi_plot = create_feature_importance_plot(fi_data)
+
+# Metrics table
+metrics_table = create_metrics_table(metrics)
+```
+
+### Configuration
+
+```python
+from dataviewer_geo import DataConfig
+
+# Default backscatter schema
+config = DataConfig(root="/path/to/data")
+
+# Custom schema
+config = DataConfig(
+    root="/path/to/data",
+    id_column="location_id",
+    lookup_file="ers_tile_id_location_id.parquet",
+    metrics_subfolder="metrics_global_plot",
+    timeseries_subfolder="timeseries",
+    feature_importance_subfolder="feature_importance",
+    metrics_by_tile_subfolder="metrics_by_tile",
+    # Custom metric models
+    metric_models={
+        "Baseline": {
+            "RMSE": ("baseline_rmse", "min"),
+            "MAE": ("baseline_mae", "min"),
+            "Pearson": ("baseline_pearson", "max"),
+        },
+        # ...
+    },
 )
 ```
 
@@ -166,8 +225,8 @@ uv run python scripts/generate_dummy_data.py --output /tmp/test_data --locations
 
 See the `examples/` directory for complete examples:
 
-- `examples/01_basic_app.py` - Basic app usage
-- `examples/02_api_usage.py` - Using the API programmatically
+- `examples/01_basic_app.py` - Basic app usage with dummy data
+- `examples/02_var_specs_editor.py` - Interactive var_specs configuration
 
 ## Dependencies
 
@@ -179,7 +238,7 @@ See the `examples/` directory for complete examples:
 - `numpy` - Numerical computing
 - `matplotlib` - Plotting
 - `pyarrow` - Fast parquet I/O
-- `plotting_joseph` - Timeseries plotting functions
+- `plotting_joseph` - Multi-panel timeseries plotting with var_specs
 
 ## License
 
